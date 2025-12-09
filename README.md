@@ -71,25 +71,70 @@ cp .env.example .env
 # OPENAI_API_KEY 또는 ANTHROPIC_API_KEY 입력
 ```
 
-### 3. ML 모델 학습
+### 3. ML 모델 학습 및 평가
 
 시스템 실행 전 반드시 ML 모델을 학습해야 합니다.
+
+#### 3-1. 모델 학습
 
 ```bash
 # XGBoost 품질 예측 모델 학습
 python scripts/train_model.py
 ```
 
+**데이터 분할 전략:**
+- Train (70%) - 모델 학습
+- Validation (15%) - Early Stopping 및 하이퍼파라미터 튜닝
+- Test (15%) - 최종 평가 (단 1회만 사용)
+
 학습 완료 후 생성되는 파일:
 - `models/quality_predictor.pkl` - 학습된 XGBoost 모델
 - `models/scaler.pkl` - 데이터 정규화 Scaler
-- `models/metrics.json` - 성능 지표 (R², MAE, MAPE)
+- `models/metrics.json` - Validation 성능 지표
 - `models/variable_mapping.json` - 변수 매핑 정보
+- `data/test_set.csv` - Test 데이터 (최종 평가용)
+
+#### 3-2. ML 모델 최종 평가 ⭐
+
+⚠️ **중요: 단 1회만 실행하세요!**
+
+```bash
+# Test 데이터로 ML 모델 최종 성능 평가
+python scripts/evaluate_final.py
+```
+
+생성되는 파일:
+- `models/final_test_results.json` - 공식 Test 성능 지표
+- `models/test_evaluation_report.txt` - 평가 리포트
 
 목표 성능:
-- **R² Score**: >0.90 (92% 예측 정확도)
-- **MAE**: <1.0
-- **MAPE**: <5%
+- **R² Score**: >0.90 (품질 예측 정확도)
+- **MAE**: <0.2 (평균 절대 오차)
+- **MAPE**: <2.0% (평균 절대 백분율 오차)
+
+#### 3-3. 서비스 전체 평가 🌟 **NEW**
+
+⚠️ **실제 데이터 기반 비즈니스 성과 측정**
+
+```bash
+# Test 데이터로 Multi-Agent 시스템 전체 성능 평가
+python scripts/evaluate_service.py
+```
+
+**평가 내용:**
+- 각 Test 샘플에 대해 파라미터 조정 전후 비교
+- Ground Truth와 비교하여 실제 효과 측정
+- 불량 감소율, 품질 회복율 등 비즈니스 지표 산출
+
+생성되는 파일:
+- `models/service_evaluation_results.json` - 서비스 성능 지표
+- `models/service_evaluation_samples.csv` - 샘플별 평가 결과
+- `models/service_evaluation_report.txt` - 종합 리포트
+
+목표 지표:
+- **불량 감소율**: >85%
+- **품질 회복율**: >80%
+- **조정 성공률**: >90%
 
 자세한 학습 가이드는 [SETUP_AND_TRAIN.md](SETUP_AND_TRAIN.md)를 참조하세요.
 
@@ -129,13 +174,21 @@ SmartFlow/
 │   └── dashboard/           # 시각화 대시보드
 │       └── app.py           # 평가지표 탭 포함
 ├── scripts/                 # 유틸리티 스크립트
-│   └── train_model.py       # ML 모델 학습 스크립트
+│   ├── train_model.py       # ML 모델 학습 스크립트
+│   ├── evaluate_final.py    # ML 모델 최종 평가 스크립트 (단 1회만)
+│   └── evaluate_service.py  # 서비스 전체 평가 스크립트 (실제 데이터 기반)
 ├── models/                  # 학습된 모델 및 메트릭 (학습 후 생성)
 │   ├── quality_predictor.pkl
 │   ├── scaler.pkl
-│   ├── metrics.json
-│   └── variable_mapping.json
+│   ├── metrics.json         # Validation 성능 지표
+│   ├── variable_mapping.json
+│   ├── final_test_results.json  # ML 모델 최종 Test 성능 지표
+│   ├── test_evaluation_report.txt
+│   ├── service_evaluation_results.json  # 서비스 성능 지표
+│   ├── service_evaluation_samples.csv   # 샘플별 평가 결과
+│   └── service_evaluation_report.txt    # 서비스 종합 리포트
 ├── data/                    # 데이터 저장
+│   ├── test_set.csv         # Test 데이터 (최종 평가용)
 │   └── historical_cases/
 ├── config/                  # 설정 파일
 │   └── settings.py
@@ -192,6 +245,69 @@ Kaggle 익명 데이터를 SmartFlow 시나리오에 매핑:
 - 조기 문제 식별 속도 35-45% 향상
 - 예측 정확도 >90%
 - 사전 조정 성공률 >85%
+
+## 테스트 및 평가 프로세스
+
+### 데이터 분할 전략
+
+SmartFlow는 공신력 있는 성능 검증을 위해 엄격한 데이터 분할을 사용합니다:
+
+```
+Kaggle 실제 데이터 (14,089 samples)
+    ↓
+┌───────────────────────────────────────┐
+│  Train Set (70%, ~9,862 samples)     │  ← 모델 학습용
+├───────────────────────────────────────┤
+│  Validation Set (15%, ~2,113 samples)│  ← Early Stopping, 하이퍼파라미터 튜닝
+├───────────────────────────────────────┤
+│  Test Set (15%, ~2,113 samples)      │  ← 최종 평가 (단 1회만 사용)
+└───────────────────────────────────────┘
+```
+
+### 평가 워크플로우
+
+1. **학습 단계** (`python scripts/train_model.py`)
+   - Train 데이터로 모델 학습
+   - Validation 데이터로 성능 모니터링
+   - Test 데이터는 `data/test_set.csv`로 저장 (건드리지 않음)
+   - Validation 성능만 `models/metrics.json`에 저장
+
+2. **ML 모델 평가** (`python scripts/evaluate_final.py`) ⚠️ **단 1회만**
+   - 저장된 Test 데이터 로드
+   - 학습된 모델로 예측
+   - 공식 성능 지표 산출 및 저장 (R², MAE, MAPE)
+   - `models/final_test_results.json` 생성
+
+3. **서비스 전체 평가** (`python scripts/evaluate_service.py`) 🌟 **NEW**
+   - Test 데이터로 Multi-Agent 시스템 전체 시뮬레이션
+   - 각 샘플에 대해 파라미터 조정 전후 비교
+   - Ground Truth와 비교하여 실제 효과 측정
+   - 비즈니스 지표 산출 (불량 감소율, 품질 회복율, 비용 절감)
+   - `models/service_evaluation_results.json` 생성
+
+4. **실시간 데모** (`python main.py`)
+   - 센서 시뮬레이터로 랜덤 데이터 생성
+   - Multi-Agent 워크플로우 시연
+   - ⚠️ 이것은 성능 평가가 아닌 데모용입니다
+
+### Test 데이터 사용 원칙
+
+✅ **올바른 사용:**
+- 모델 학습이 완전히 끝난 후 단 1회 ML 평가 (`evaluate_final.py`)
+- 서비스 전체 성능 검증 (`evaluate_service.py`)
+- 공식 성능 지표 발표용
+- 논문/보고서 제출용
+- 비즈니스 가치 측정용
+
+❌ **잘못된 사용:**
+- Test 성능을 보고 모델 재학습
+- Test 데이터로 하이퍼파라미터 튜닝
+- Test 평가를 여러 번 반복
+- Test 데이터를 학습에 사용
+
+🌟 **핵심 차이점:**
+- `evaluate_final.py`: ML 모델의 예측 정확도 평가
+- `evaluate_service.py`: 파라미터 조정 시스템의 비즈니스 효과 평가
 
 ## 평가지표
 

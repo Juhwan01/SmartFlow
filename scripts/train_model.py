@@ -82,46 +82,92 @@ class ModelTrainer:
         # 3. Feature Engineering 적용
         df_fe = self.feature_engineering(df)
         feature_cols = [col for col in df_fe.columns if col != target_col]
-        
+
         X = df_fe[feature_cols].values
         y = df_fe[target_col].values
 
         # 4. 스케일링
         X_scaled = self.scaler.fit_transform(X)
 
-        # 5. Train/Test 분리
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y, test_size=0.2, random_state=42
+        # 5. Train/Validation/Test 분리 (70/15/15)
+        # Step 1: Train+Val / Test 분리
+        X_trainval, X_test, y_trainval, y_test = train_test_split(
+            X_scaled, y, test_size=0.15, random_state=42
         )
 
-        # 6. 모델 학습
-        # [수정됨] eval_metric과 early_stopping_rounds를 생성자로 이동
+        # Step 2: Train / Validation 분리
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_trainval, y_trainval, test_size=0.176, random_state=42  # 0.176 ≈ 15/(70+15)
+        )
+
+        logger.info(f"데이터 분할: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
+
+        # 6. Test 데이터 저장 (최종 평가용)
+        test_df = pd.DataFrame(X_test, columns=feature_cols)
+        test_df[target_col] = y_test
+        test_path = Path("data/test_set.csv")
+        test_path.parent.mkdir(parents=True, exist_ok=True)
+        test_df.to_csv(test_path, index=False)
+        logger.info(f"✅ Test 데이터 저장: {test_path} (최종 평가용, 절대 재학습 금지)")
+
+        # 6-1. Sample Weighting 계산 (불량품 강조 학습)
+        # ===================================================================
+        # 불균형 데이터 대응: 불량 샘플에 높은 가중치 부여
+        # 참고: 2024 제조 불량 감지 연구 (MDPI Sensors)
+        # ===================================================================
+        SETPOINT = 12.0500
+        LSL = SETPOINT * 0.9  # 10.8450
+        USL = SETPOINT * 1.1  # 13.2550
+
+        # Train 데이터에서 불량 샘플 식별
+        train_defects = (y_train < LSL) | (y_train > USL)
+        num_defects = train_defects.sum()
+        num_normal = len(y_train) - num_defects
+
+        # 가중치 계산: 불량 샘플에 정상/불량 비율만큼 가중치 부여
+        if num_defects > 0:
+            defect_weight = num_normal / num_defects
+        else:
+            defect_weight = 1.0
+
+        # Sample weights 생성
+        sample_weights = np.ones(len(y_train))
+        sample_weights[train_defects] = defect_weight
+
+        logger.info(f"\n불균형 데이터 대응:")
+        logger.info(f"  - 정상 샘플: {num_normal}개 (가중치: 1.0)")
+        logger.info(f"  - 불량 샘플: {num_defects}개 (가중치: {defect_weight:.1f})")
+        logger.info(f"  - 불량률: {num_defects/len(y_train)*100:.2f}%")
+
+        # 7. 모델 학습 (Validation 데이터로 Early Stopping)
         self.model = xgb.XGBRegressor(
             n_estimators=n_estimators,
             max_depth=max_depth,
             learning_rate=learning_rate,
             min_child_weight=1,
+            max_delta_step=1,  # 극단값 학습 개선
             subsample=0.8,
             colsample_bytree=0.8,
             early_stopping_rounds=50,
-            eval_metric='mae',           # <-- 여기로 이동했습니다
+            eval_metric='mae',
             objective='reg:squarederror',
             random_state=42,
             n_jobs=-1
         )
 
-        logger.info("모델 학습 중...")
-        
-        # [수정됨] fit 함수에서 매개변수 제거
+        logger.info("\n모델 학습 중 (불량 샘플 강조 학습 + Validation Early Stopping)...")
+
+        # Validation 데이터로 early stopping (sample_weight 적용)
         self.model.fit(
             X_train, y_train,
-            eval_set=[(X_test, y_test)],
+            sample_weight=sample_weights,  # 불량 샘플 강조!
+            eval_set=[(X_val, y_val)],
             verbose=False
         )
 
-        # 7. 예측 및 평가
+        # 8. 예측 및 평가 (Train, Validation만 - Test는 evaluate_final.py에서)
         y_pred_train = self.model.predict(X_train)
-        y_pred_test = self.model.predict(X_test)
+        y_pred_val = self.model.predict(X_val)
 
         self.metrics = {
             "train": {
@@ -130,21 +176,27 @@ class ModelTrainer:
                 "rmse": np.sqrt(mean_squared_error(y_train, y_pred_train)),
                 "mape": self._calculate_mape(y_train, y_pred_train)
             },
+            "validation": {
+                "r2": r2_score(y_val, y_pred_val),
+                "mae": mean_absolute_error(y_val, y_pred_val),
+                "rmse": np.sqrt(mean_squared_error(y_val, y_pred_val)),
+                "mape": self._calculate_mape(y_val, y_pred_val)
+            },
             "test": {
-                "r2": r2_score(y_test, y_pred_test),
-                "mae": mean_absolute_error(y_test, y_pred_test),
-                "rmse": np.sqrt(mean_squared_error(y_test, y_pred_test)),
-                "mape": self._calculate_mape(y_test, y_pred_test)
+                "note": "Test 평가는 scripts/evaluate_final.py에서 단 1회만 수행",
+                "test_set_path": "data/test_set.csv"
             }
         }
 
         # 결과 출력
         logger.info("\n" + "=" * 70)
-        logger.info("학습 결과 (Test Set)")
+        logger.info("학습 결과 (Validation Set)")
         logger.info("=" * 70)
-        logger.info(f"✅ MAE (평균 오차): {self.metrics['test']['mae']:.4f} (목표: < 0.2)")
-        logger.info(f"✅ MAPE (오차율)  : {self.metrics['test']['mape']:.2f}%  (목표: < 2%)")
-        logger.info(f"ℹ️  R² Score     : {self.metrics['test']['r2']:.4f}")
+        logger.info(f"✅ MAE (평균 오차): {self.metrics['validation']['mae']:.4f} (목표: < 0.2)")
+        logger.info(f"✅ MAPE (오차율)  : {self.metrics['validation']['mape']:.2f}%  (목표: < 2%)")
+        logger.info(f"ℹ️  R² Score     : {self.metrics['validation']['r2']:.4f}")
+        logger.info("=" * 70)
+        logger.info("⚠️  Test 데이터 평가는 scripts/evaluate_final.py에서 단 1회만 수행합니다.")
         logger.info("=" * 70)
 
         # Feature Importance
@@ -180,28 +232,30 @@ class ModelTrainer:
 
 def main():
     logger.info("SmartFlow ML Model Training (Business KPI Optimized)")
-    
+
     trainer = ModelTrainer()
     model, metrics = trainer.train_xgboost()
     trainer.save_model()
 
     print("\n" + "=" * 70)
-    print("🎯 최종 성능 요약")
+    print("🎯 학습 성능 요약 (Validation Set)")
     print("=" * 70)
-    
-    mae_score = metrics['test']['mae']
-    mape_score = metrics['test']['mape']
-    
-    print(f"✅ Test MAE  : {mae_score:.4f} (목표: < 0.2)")
-    print(f"✅ Test MAPE : {mape_score:.2f}% (목표: < 2.0%)")
-    print(f"ℹ️  Test R²   : {metrics['test']['r2']:.4f}")
+
+    mae_score = metrics['validation']['mae']
+    mape_score = metrics['validation']['mape']
+
+    print(f"✅ Validation MAE  : {mae_score:.4f} (목표: < 0.2)")
+    print(f"✅ Validation MAPE : {mape_score:.2f}% (목표: < 2.0%)")
+    print(f"ℹ️  Validation R²   : {metrics['validation']['r2']:.4f}")
 
     if mae_score < 0.2:
         print("\n🎉 목표 달성! 현장 투입 가능한 초정밀 예측 성능을 확보했습니다.")
         print("   (평균 오차 0.2 미만으로 품질 제어 가능)")
     else:
         print(f"\n⚠️  추가 튜닝 필요 (현재 오차: {mae_score:.4f})")
-    
+
+    print("=" * 70)
+    print("⚠️  최종 Test 평가는 'python scripts/evaluate_final.py'로 수행하세요.")
     print("=" * 70)
 
 if __name__ == "__main__":
