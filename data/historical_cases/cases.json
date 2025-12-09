@@ -1,0 +1,161 @@
+[
+  {
+    "case_id": "CASE-2024-001",
+    "date": "2024-11-15",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.025mm 발생",
+    "issue_severity": "medium",
+    "action_taken": "용접 속도 5% 감소, 압력 2% 증가",
+    "parameters_adjusted": {
+      "welding_speed": -0.05,
+      "pressure": 0.02
+    },
+    "outcome": "success",
+    "quality_before": 0.88,
+    "quality_after": 0.95,
+    "notes": "프레스 공정에서 두께 편차가 발생했으나, 용접 파라미터 조정으로 품질 회복",
+    "lessons_learned": "두께 편차 발생 시 속도를 줄이고 압력을 미세 조정하면 효과적"
+  },
+  {
+    "case_id": "CASE-2024-002",
+    "date": "2024-11-18",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.018mm, 압력 미세 상승",
+    "issue_severity": "low",
+    "action_taken": "용접 속도 3% 감소",
+    "parameters_adjusted": {
+      "welding_speed": -0.03
+    },
+    "outcome": "success",
+    "quality_before": 0.91,
+    "quality_after": 0.96,
+    "notes": "작은 편차는 속도 조정만으로 해결 가능",
+    "lessons_learned": "저강도 이상은 단일 파라미터 조정으로 충분"
+  },
+  {
+    "case_id": "CASE-2024-003",
+    "date": "2024-11-20",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.030mm",
+    "issue_severity": "high",
+    "action_taken": "용접 속도 7% 감소, 전류 3% 증가, 압력 3% 증가",
+    "parameters_adjusted": {
+      "welding_speed": -0.07,
+      "current": 0.03,
+      "pressure": 0.03
+    },
+    "outcome": "success",
+    "quality_before": 0.85,
+    "quality_after": 0.93,
+    "notes": "높은 편차에는 다중 파라미터 조정 필요",
+    "lessons_learned": "고강도 이상은 복합 조정이 효과적"
+  },
+  {
+    "case_id": "CASE-2024-004",
+    "date": "2024-11-22",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.022mm",
+    "issue_severity": "medium",
+    "action_taken": "전류만 10% 증가 (과도한 조정)",
+    "parameters_adjusted": {
+      "current": 0.1
+    },
+    "outcome": "failure",
+    "quality_before": 0.89,
+    "quality_after": 0.75,
+    "notes": "전류를 과도하게 높였더니 비드 균열 발생",
+    "lessons_learned": "전류 단독 증가는 위험. 균형 잡힌 조정 필요"
+  },
+  {
+    "case_id": "CASE-2024-005",
+    "date": "2024-11-25",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.020mm",
+    "issue_severity": "medium",
+    "action_taken": "조치 없이 진행 (무대응)",
+    "parameters_adjusted": {},
+    "outcome": "failure",
+    "quality_before": 0.9,
+    "quality_after": 0.82,
+    "notes": "중간 정도 편차를 무시했더니 후속 공정에서 품질 저하",
+    "lessons_learned": "중간 강도 이상도 반드시 조치 필요"
+  },
+  {
+    "case_id": "CASE-2024-006",
+    "date": "2024-11-28",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.035mm (고강도)",
+    "issue_severity": "high",
+    "action_taken": "속도만 3% 감소 (불충분한 조정)",
+    "parameters_adjusted": {
+      "welding_speed": -0.03
+    },
+    "outcome": "failure",
+    "quality_before": 0.83,
+    "quality_after": 0.86,
+    "notes": "고강도 이상에 대해 단일 파라미터 조정은 불충분",
+    "lessons_learned": "심각한 이상은 복합 조정 전략 필요"
+  },
+  {
+    "case_id": "CASE-2024-007",
+    "date": "2024-12-01",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 -0.020mm (음수 편차)",
+    "issue_severity": "medium",
+    "action_taken": "용접 속도 4% 증가, 압력 2% 감소",
+    "parameters_adjusted": {
+      "welding_speed": 0.04,
+      "pressure": -0.02
+    },
+    "outcome": "success",
+    "quality_before": 0.87,
+    "quality_after": 0.94,
+    "notes": "음수 편차는 양수 편차와 반대 방향으로 조정",
+    "lessons_learned": "편차 방향에 따라 조정 방향도 반대로"
+  },
+  {
+    "case_id": "CASE-2024-008",
+    "date": "2024-12-03",
+    "process_stage": "welding",
+    "issue_detected": "용접 온도 과도 상승 (850°C)",
+    "issue_severity": "medium",
+    "action_taken": "전류 5% 감소, 속도 3% 증가",
+    "parameters_adjusted": {
+      "current": -0.05,
+      "welding_speed": 0.03
+    },
+    "outcome": "success",
+    "quality_before": 0.86,
+    "quality_after": 0.92,
+    "notes": "온도 상승 시 전류 감소와 속도 증가로 냉각 효과",
+    "lessons_learned": "온도 이상은 전류-속도 동시 조정이 효과적"
+  },
+  {
+    "case_id": "CASE-2024-009",
+    "date": "2024-12-05",
+    "process_stage": "press",
+    "issue_detected": "압력 급증 (+15MPa)",
+    "issue_severity": "high",
+    "action_taken": "프레스 압력 재보정, 용접 파라미터 유지",
+    "parameters_adjusted": {},
+    "outcome": "success",
+    "quality_before": 0.84,
+    "quality_after": 0.95,
+    "notes": "프레스 공정 자체 문제는 해당 공정에서 해결",
+    "lessons_learned": "근본 원인 공정에서 직접 조치하는 것이 최선"
+  },
+  {
+    "case_id": "CASE-2024-010",
+    "date": "2024-12-07",
+    "process_stage": "press",
+    "issue_detected": "두께 편차 +0.015mm (경미)",
+    "issue_severity": "low",
+    "action_taken": "모니터링만 수행, 파라미터 조정 없음",
+    "parameters_adjusted": {},
+    "outcome": "success",
+    "quality_before": 0.92,
+    "quality_after": 0.93,
+    "notes": "경미한 편차는 자연 회복 가능",
+    "lessons_learned": "모든 이상에 과잉 반응할 필요 없음, 임계값 관리 중요"
+  }
+]
