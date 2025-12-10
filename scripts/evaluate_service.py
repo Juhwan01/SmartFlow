@@ -105,7 +105,7 @@ class ServiceEvaluator:
 
     def predict_quality(self, raw_row: Dict[str, float]) -> MLQualityPrediction:
         """
-        품질 예측 (ML 모델 사용)
+        품질 예측 (ML 모델 직접 사용)
 
         Args:
             raw_row: 원본 피처 딕셔너리
@@ -113,18 +113,34 @@ class ServiceEvaluator:
         Returns:
             MLQualityPrediction 객체
         """
-        # 피처 배열 준비
-        features = np.array([[raw_row[col] for col in self.feature_cols]])
+        # 피처 배열 준비 및 스케일링
+        features_raw = np.array([[raw_row[col] for col in self.feature_cols]])
+        features_scaled = self.scaler.transform(features_raw)
 
         # 예측
-        predicted_strength = float(self.ml_model.predict(features)[0])
+        predicted_strength = float(self.ml_model.predict(features_scaled)[0])
 
-        # 품질 점수 계산
-        baseline_strength = 12.0  # 기준 강도
-        predicted_quality_score = min(1.0, predicted_strength / baseline_strength)
+        # 품질 점수 계산 (config 기반 LSL/Target/USL)
+        # LSL~Target: 0~90점, Target~USL: 90~100점
+        # LSL 미만이나 USL 초과도 점수 부여 (음수/100점 초과 가능 → clip)
+        if predicted_strength >= self.target:
+            # Target 이상: 90~100점 (USL 초과 시 100점 이상)
+            predicted_quality_score = 0.9 + 0.1 * (predicted_strength - self.target) / (self.usl - self.target)
+        else:
+            # Target 미만: 0~90점 (LSL 미만 시 0점 미만)
+            predicted_quality_score = 0.9 * (predicted_strength - self.lsl) / (self.target - self.lsl)
 
-        # 강도 저하율
-        strength_degradation = max(0, (baseline_strength - predicted_strength) / baseline_strength * 100)
+        predicted_quality_score = float(np.clip(predicted_quality_score, 0.0, 1.0))
+        
+        # 디버깅: 0점인 경우 로그
+        if predicted_quality_score <= 0.01:
+            logger.warning(
+                f"품질 점수 0%: strength={predicted_strength:.2f} < LSL={self.lsl:.2f} "
+                f"(Target={self.target:.2f}, USL={self.usl:.2f})"
+            )
+
+        # 강도 저하율 (target 기준)
+        strength_degradation = max(0, (self.target - predicted_strength) / self.target * 100)
 
         # 위험 수준
         if predicted_quality_score >= self.quality_threshold:
@@ -142,7 +158,7 @@ class ServiceEvaluator:
             strength_degradation_pct=strength_degradation,
             confidence=0.92,
             risk_level=risk_level,
-            baseline_strength=baseline_strength,
+            baseline_strength=self.target,
             model_used="XGBoost",
             recommendation="자동 평가"
         )
@@ -168,19 +184,32 @@ class ServiceEvaluator:
         # ML 모델 로드 (feature_cols 설정 후)
         self._load_ml_model()
 
-        # 품질 스펙 계산
-        target_values = self.test_data[target_col].values
-        self.lsl = float(np.percentile(target_values, 5))
-        self.usl = float(np.percentile(target_values, 95))
-        self.spec_span = max(self.usl - self.lsl, 1e-3)
+        # 품질 스펙 - config에서 로드 (업계 표준 고정값)
+        self.lsl = settings.welding_strength_lsl
+        self.usl = settings.welding_strength_usl
+        self.target = settings.welding_strength_target
+        self.spec_span = self.usl - self.lsl
 
-        # 이상 감지를 위한 통계값 계산
+        # 실제 데이터와 비교
+        target_values = self.test_data[target_col].values
+        defects_count = np.sum((target_values < self.lsl) | (target_values > self.usl))
+        defects_pct = defects_count / len(target_values) * 100
+        
+        logger.info(f"   품질 기준 (config): LSL={self.lsl:.2f}, Target={self.target:.2f}, USL={self.usl:.2f}")
+        logger.info(f"   실제 불량 샘플: {defects_count}/{len(target_values)} ({defects_pct:.1f}%)")
+        
+        below_target = np.sum(target_values < self.target)
+        logger.info(f"   Target 미만: {below_target}/{len(target_values)} ({below_target/len(target_values):.1%})")
+
+        # 이상 감지를 위한 통계값 계산 (1-2% 감지 수준)
         self.feature_stats = {}
         for col in self.feature_cols:
             values = self.test_data[col].values
             self.feature_stats[col] = {
                 'mean': float(np.mean(values)),
                 'std': float(np.std(values)),
+                'q01': float(np.percentile(values, 1)),   # 1% 하한
+                'q99': float(np.percentile(values, 99)),  # 99% 상한
                 'q05': float(np.percentile(values, 5)),
                 'q95': float(np.percentile(values, 95))
             }
@@ -191,28 +220,22 @@ class ServiceEvaluator:
 
     def detect_anomaly(self, raw_row: Dict[str, float]) -> bool:
         """
-        이상 감지 (통계 기반)
+        이상 감지 (실제 서비스 에이전트 사용)
 
         Args:
             raw_row: 원본 피처 딕셔너리
 
         Returns:
-            이상 여부
+            이상 여부 (예측 불량 시 True)
         """
-        # 주요 파라미터 체크 (두께 편차가 큰 경우)
-        if "press_thickness" in raw_row and "press_thickness" in self.feature_stats:
-            stats = self.feature_stats["press_thickness"]
-            thickness = raw_row["press_thickness"]
+        # ML 모델로 품질 예측
+        prediction = self.predict_quality(raw_row)
 
-            # 5%~95% 범위를 벗어나면 이상
-            if thickness < stats['q05'] or thickness > stats['q95']:
-                return True
-
-            # 평균에서 2 표준편차 이상 벗어나면 이상
-            if abs(thickness - stats['mean']) > 2 * stats['std']:
-                return True
-
-        return False
+        # ProcessMonitor의 이상 감지 로직 사용 (MVP 설계: quality_score도 전달)
+        return self.process_monitor.is_anomaly_detected(
+            predicted_strength=prediction.predicted_strength,
+            predicted_quality_score=prediction.predicted_quality_score
+        )
 
     def _meets_quality_spec(self, value: float) -> bool:
         """품질 기준 충족 여부"""
@@ -277,15 +300,28 @@ class ServiceEvaluator:
         adjusted_gt = original_gt * (1 + strength_change_pct)
         return float(np.clip(adjusted_gt, self.lsl - 0.5, self.usl + 0.5))
 
-    def evaluate_samples(self):
-        """Test 샘플 평가 (실제 Multi-Agent 시스템 사용)"""
+    def evaluate_samples(self, sample_size: int = None):
+        """
+        Test 샘플 평가 (실제 Multi-Agent 시스템 사용)
+        
+        Args:
+            sample_size: 평가할 샘플 수 (None이면 전체)
+        """
         logger.info("\n" + "=" * 70)
         logger.info("🔍 실제 Multi-Agent 시스템으로 평가 시작")
         logger.info("=" * 70)
 
         target_col = "welding_strength"
-        X_test = self.test_data[self.feature_cols].values
-        y_test = self.test_data[target_col].values
+        
+        # 샘플 크기 결정
+        if sample_size is not None and sample_size < len(self.test_data):
+            logger.info(f"⚠️  샘플 크기 제한: {sample_size}/{len(self.test_data)} (빠른 평가)")
+            eval_data = self.test_data.head(sample_size)
+        else:
+            eval_data = self.test_data
+            
+        X_test = eval_data[self.feature_cols].values
+        y_test = eval_data[target_col].values
 
         for i in range(len(X_test)):
             features = X_test[i:i+1]
@@ -299,6 +335,14 @@ class ServiceEvaluator:
             baseline_pred_obj = self.predict_quality(raw_row)
             baseline_pred = baseline_pred_obj.predicted_strength
 
+            # 디버그: 처음 10개 샘플 로깅
+            if i < 10:
+                logger.info(
+                    f"샘플 {i}: pred_strength={baseline_pred:.4f}, "
+                    f"quality_score={baseline_pred_obj.predicted_quality_score:.4f}, "
+                    f"is_anomaly={is_anomaly}, risk={baseline_pred_obj.risk_level}"
+                )
+
             decision_status = "skipped"
             adjustment_applied = False
             adjusted_pred = baseline_pred
@@ -311,12 +355,12 @@ class ServiceEvaluator:
                 current_pred_obj = baseline_pred_obj
 
                 for iteration in range(self.max_iterations):
-                    # 품질 기준 충족하면 종료
-                    if self._meets_quality_spec(current_pred_obj.predicted_strength):
+                    # 품질 점수가 목표에 도달하면 종료
+                    if current_pred_obj.predicted_quality_score >= self.quality_threshold:
                         break
 
                     # Negotiation Agent: RAG 기반 조정 제안
-                    current_issue = f"품질 저하 감지: {current_pred_obj.predicted_strength:.3f} (목표: {self.lsl:.3f}~{self.usl:.3f})"
+                    current_issue = f"품질 저하 감지: 품질 점수 {current_pred_obj.predicted_quality_score:.2%} (목표: {self.quality_threshold:.0%})"
 
                     try:
                         proposal = self.negotiation_agent.analyze_situation_and_propose(
@@ -488,10 +532,23 @@ class ServiceEvaluator:
 
 def main():
     """메인 실행 함수"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="SmartFlow Multi-Agent 시스템 평가")
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=None,
+        help="평가할 샘플 수 (기본: 전체 데이터)"
+    )
+    args = parser.parse_args()
+    
     print("\n" + "=" * 70)
     print("🔬 SmartFlow Multi-Agent 시스템 평가")
     print("=" * 70)
     print("⚠️  실제 서비스 에이전트를 사용하여 Test 데이터로 성능을 평가합니다.")
+    if args.sample_size:
+        print(f"   샘플 크기: {args.sample_size}")
     print("=" * 70)
 
     try:
@@ -502,7 +559,7 @@ def main():
         )
 
         evaluator.load_test_data()
-        evaluator.evaluate_samples()
+        evaluator.evaluate_samples(sample_size=args.sample_size)
         evaluator.calculate_and_report_metrics()
 
         print("\n" + "=" * 70)

@@ -131,18 +131,25 @@ class CoordinatorAgent:
         rationale_parts = []
         conditions = []
 
-        # 1. 품질 목표 확인
-        quality_check = proposal.expected_quality >= self.production_goals.target_quality
+        # 1. 품질 개선 확인 (목표 도달 또는 개선)
+        quality_improvement = proposal.expected_quality > current_quality_score
+        quality_target_met = proposal.expected_quality >= self.production_goals.target_quality
+        quality_check = quality_improvement  # 개선만 있어도 일단 긍정적 평가
 
-        if quality_check:
+        if quality_target_met:
             rationale_parts.append(
-                f"✅ 품질 목표 충족 (예상: {proposal.expected_quality:.2%}, "
+                f"✅ 품질 목표 충족 (현재: {current_quality_score:.2%} → 예상: {proposal.expected_quality:.2%}, "
                 f"목표: {self.production_goals.target_quality:.2%})"
+            )
+        elif quality_improvement:
+            improvement_pct = (proposal.expected_quality - current_quality_score) * 100
+            rationale_parts.append(
+                f"🔄 품질 개선 (현재: {current_quality_score:.2%} → 예상: {proposal.expected_quality:.2%}, "
+                f"개선: +{improvement_pct:.1f}%p)"
             )
         else:
             rationale_parts.append(
-                f"⚠️  품질 목표 미달 (예상: {proposal.expected_quality:.2%}, "
-                f"목표: {self.production_goals.target_quality:.2%})"
+                f"⚠️  품질 개선 없음 (현재: {current_quality_score:.2%}, 예상: {proposal.expected_quality:.2%})"
             )
 
         # 2. 사이클 타임 영향 확인
@@ -191,13 +198,17 @@ class CoordinatorAgent:
         # 최종 결정
         if quality_check and cycle_time_check and cost_check:
             status = "approved"
-            decision_message = "✅ 제안 승인"
-        elif quality_check:
+            decision_message = "✅ 제안 승인 (품질 개선 + 비용/시간 허용)"
+        elif quality_check and (cycle_time_check or cost_check):
             status = "conditional_approved"
-            decision_message = "⚠️  조건부 승인 (조건 충족 시 실행)"
+            decision_message = "⚠️  조건부 승인 (품질 개선 있으나 일부 제약 초과)"
+        elif quality_check:
+            # 품질 개선이 있으면 일단 시도
+            status = "approved" if quality_improvement else "conditional_approved"
+            decision_message = "🔄 승인 (품질 개선 우선)"
         else:
             status = "rejected"
-            decision_message = "❌ 제안 반려"
+            decision_message = "❌ 제안 반려 (품질 개선 없음)"
 
         rationale = f"{decision_message}\n\n" + "\n".join(rationale_parts)
 
@@ -213,7 +224,8 @@ class CoordinatorAgent:
 
         logger.info(
             f"결정 완료 - {decision_id}: {status} "
-            f"(품질: {quality_check}, 시간: {cycle_time_check}, 비용: {cost_check})"
+            f"(품질개선: {quality_improvement}, 목표도달: {quality_target_met}, "
+            f"시간: {cycle_time_check}, 비용: {cost_check})"
         )
 
         return decision

@@ -220,7 +220,7 @@ class SensorSimulator:
         welding_data: WeldingSensorData
     ) -> Dict[str, float]:
         """
-        공정 간 품질 영향 계산
+        공정 간 품질 영향 계산 (config 기반 품질 기준 사용)
 
         Args:
             press_data: 프레스 공정 데이터
@@ -229,30 +229,41 @@ class SensorSimulator:
         Returns:
             품질 영향 지표 딕셔너리
         """
-        # 기준 강도 (정상 조건)
-        baseline_strength = 350.0
+        # config 기반 품질 스펙
+        lsl = settings.welding_strength_lsl
+        usl = settings.welding_strength_usl
+        target = settings.welding_strength_target
 
         # 실제 강도
         actual_strength = welding_data.strength
 
-        # 강도 저하율
-        strength_degradation = (baseline_strength - actual_strength) / baseline_strength
+        # 품질 점수 계산 (LSL~Target: 0~90점, Target~USL: 90~100점)
+        if actual_strength >= target:
+            quality_score = 0.9 + 0.1 * (actual_strength - target) / (usl - target)
+        else:
+            quality_score = 0.9 * (actual_strength - lsl) / (target - lsl)
+        
+        quality_score = float(np.clip(quality_score, 0.0, 1.0))
 
-        # 품질 점수 (0~1, 1이 완벽)
-        quality_score = actual_strength / baseline_strength
+        # 강도 저하율 (target 기준)
+        strength_degradation = max(0, (target - actual_strength) / target * 100)
 
         # 두께 편차
         thickness_deviation = abs(
             press_data.thickness - self.press_thickness_mean
         )
 
+        # LSL/USL 범위 충족 여부
+        meets_spec = lsl <= actual_strength <= usl
+
         return {
-            "baseline_strength": baseline_strength,
+            "baseline_strength": target,
             "actual_strength": actual_strength,
-            "strength_degradation_pct": strength_degradation * 100,
+            "strength_degradation_pct": strength_degradation,
             "quality_score": quality_score,
             "thickness_deviation": thickness_deviation,
-            "meets_threshold": quality_score >= settings.quality_threshold
+            "meets_threshold": quality_score >= settings.quality_threshold,
+            "meets_spec": meets_spec
         }
 
 

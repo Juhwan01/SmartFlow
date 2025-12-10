@@ -46,9 +46,12 @@ class MLQualityCascadePredictor:
         self.scaler = None
         self.model_loaded = False
 
-        # 통계 정보 (데이터셋 기반)
-        self.baseline_strength = 12.0  # 임시값, 실제로는 학습 데이터의 평균
-        self.strength_std = 5.0  # 표준편차
+        # 품질 스펙 (config에서 로드)
+        self.lsl = settings.welding_strength_lsl
+        self.usl = settings.welding_strength_usl
+        self.target = settings.welding_strength_target
+        self.baseline_strength = self.target
+        self.strength_std = 5.0  # 표준편차 (나중에 metrics에서 로드 가능)
 
         # 모델 로드 시도
         self._load_model()
@@ -166,11 +169,19 @@ class MLQualityCascadePredictor:
         # 예측
         predicted_strength = self.model.predict(features)[0]
 
-        # 품질 점수 계산
-        predicted_quality_score = min(1.0, predicted_strength / self.baseline_strength)
+        # 품질 점수 계산 (LSL~USL 범위 기준 정규화)
+        # LSL~Target: 0~90점, Target~USL: 90~100점
+        if predicted_strength >= self.target:
+            # Target 이상: 90~100점
+            predicted_quality_score = 0.9 + 0.1 * (predicted_strength - self.target) / (self.usl - self.target)
+        else:
+            # Target 미만: 0~90점 (LSL 미만도 점수 부여)
+            predicted_quality_score = 0.9 * (predicted_strength - self.lsl) / (self.target - self.lsl)
+        
+        predicted_quality_score = float(np.clip(predicted_quality_score, 0.0, 1.0))
 
-        # 강도 저하율
-        strength_degradation = max(0, (self.baseline_strength - predicted_strength) / self.baseline_strength * 100)
+        # 강도 저하율 (target 기준)
+        strength_degradation = max(0, (self.target - predicted_strength) / self.target * 100)
 
         # 신뢰도 (모델 R² 기반, 메트릭에서 가져올 수 있음)
         confidence = 0.92  # 임시값, 실제로는 metrics.json에서

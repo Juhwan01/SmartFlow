@@ -32,10 +32,12 @@ class QualityCascadePredictor:
         MVP에서는 간단한 룰 기반 모델 사용
         실제 시스템에서는 Multi-scale CNN이나 MEPN 등의 딥러닝 모델 사용
         """
-        # 기준값
+        # 기준값 (config 기반)
         self.baseline_thickness = 2.0  # mm
-        self.baseline_strength = 350.0  # MPa
+        self.baseline_strength = settings.welding_strength_target  # config 기반 target
         self.baseline_quality = 1.0
+        self.lsl = settings.welding_strength_lsl
+        self.usl = settings.welding_strength_usl
 
         # 영향 계수 (데이터 기반으로 학습된 값으로 가정)
         self.impact_coefficients = {
@@ -141,8 +143,15 @@ class QualityCascadePredictor:
         )
         predicted_strength = max(0, predicted_strength)
 
-        # 품질 점수 계산
-        predicted_quality_score = predicted_strength / self.baseline_strength
+        # 품질 점수 계산 (config 기반 LSL/Target/USL)
+        if predicted_strength >= self.baseline_strength:
+            # Target 이상: 90~100점
+            predicted_quality_score = 0.9 + 0.1 * (predicted_strength - self.baseline_strength) / (self.usl - self.baseline_strength)
+        else:
+            # Target 미만: 0~90점
+            predicted_quality_score = 0.9 * (predicted_strength - self.lsl) / (self.baseline_strength - self.lsl)
+        
+        predicted_quality_score = float(np.clip(predicted_quality_score, 0.0, 1.0))
 
         # 강도 저하율
         strength_degradation = (

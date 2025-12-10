@@ -240,9 +240,10 @@ class ModelTrainer:
         # 불균형 데이터 대응: 불량 샘플에 높은 가중치 부여
         # 참고: 2024 제조 불량 감지 연구 (MDPI Sensors)
         # ===================================================================
-        SETPOINT = 12.0500
-        LSL = SETPOINT * 0.9  # 10.8450
-        USL = SETPOINT * 1.1  # 13.2550
+        # Config 기반 품질 기준 사용 (업계 표준)
+        from config import settings
+        LSL = settings.welding_strength_lsl  # 11.50
+        USL = settings.welding_strength_usl  # 13.20
 
         # Train 데이터에서 불량 샘플 식별
         train_defects = (y_train < LSL) | (y_train > USL)

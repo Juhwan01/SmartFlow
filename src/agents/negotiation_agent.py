@@ -144,19 +144,25 @@ class NegotiationAgent:
 {rag_context}
 
 ## 요청사항
-위 정보를 바탕으로, 다음 형식으로 조정안을 제안하세요:
+위 정보를 바탕으로 조정안을 제안하되, 반드시 다음 JSON 형식으로 응답하세요:
 
-1. **상황 해석**: 현재 문제의 핵심 원인과 영향 설명
-2. **과거 사례 분석**: 유사 사례에서 얻은 교훈
-3. **조정안 제안**:
-   - welding_speed (용접 속도): X% 조정
-   - current (전류): Y% 조정
-   - pressure (압력): Z% 조정
-4. **근거**: 왜 이 조정안이 효과적인지 설명
-5. **위험 평가**: 이 조정안의 잠재적 위험과 완화 방안
-6. **대안**: 다른 접근 방법이 있다면 간단히 제시
+```json
+{{
+  "situation_analysis": "현재 문제의 핵심 원인과 영향 설명 (2-3문장)",
+  "case_learning": "과거 사례에서 얻은 교훈 (2-3문장)",
+  "adjustments": {{
+    "welding_speed": -10,
+    "current": 7,
+    "pressure": 5
+  }},
+  "rationale": "왜 이 조정안이 효과적인지 설명 (2-3문장)",
+  "risk_assessment": "잠재적 위험과 완화 방안 (1-2문장)"
+}}
+```
 
-응답은 명확하고 간결하게 작성하세요.
+중요: 
+- adjustments의 값은 백분율 숫자로 입력 (예: -10은 -10%, 7은 +7%)
+- JSON 형식을 정확히 지켜주세요. 다른 텍스트 없이 JSON만 응답하세요.
 """
 
         # LLM 호출
@@ -169,15 +175,26 @@ class NegotiationAgent:
         llm_analysis = response.content
 
         logger.info("LLM 분석 완료")
+        logger.debug(f"LLM 응답 (처음 500자):\n{llm_analysis[:500]}")
 
-        # 조정안 파싱 (간단한 휴리스틱 사용, 실제로는 더 정교한 파싱 필요)
+        # 조정안 파싱
         adjustments = self._parse_adjustments_from_llm(llm_analysis, prediction)
+
+        # 조정 크기에 따른 예상 품질 개선 계산
+        # 조정이 클수록 더 큰 개선 기대 (물리적 근사)
+        adjustment_magnitude = abs(adjustments.get("welding_speed", 0)) + \
+                              abs(adjustments.get("current", 0)) + \
+                              abs(adjustments.get("pressure", 0))
+        
+        # 조정 크기에 비례한 품질 개선 (최소 3%, 최대 15%)
+        expected_improvement = min(0.15, max(0.03, adjustment_magnitude * 0.5))
+        expected_quality = min(1.0, prediction.predicted_quality_score + expected_improvement)
 
         # 제안 생성
         proposal = AdjustmentProposal(
             proposal_id=self._generate_proposal_id(),
             adjustments=adjustments,
-            expected_quality=prediction.predicted_quality_score + 0.05,  # 예상 개선
+            expected_quality=expected_quality,
             rationale=llm_analysis,
             risk_assessment=prediction.risk_level
         )
@@ -196,24 +213,76 @@ class NegotiationAgent:
         """
         LLM 응답에서 조정값 파싱
 
-        실제로는 구조화된 출력(JSON)을 사용하는 것이 좋지만,
-        MVP에서는 간단한 휴리스틱 사용
+        JSON 형식 응답을 파싱하거나, 실패 시 위험도 기반 기본값 사용
         """
-        # 예측 기반 기본 조정안
+        import json
+        import re
+        
         adjustments = {}
-
-        # 위험도에 따른 기본 조정
-        if prediction.risk_level == "low":
-            adjustments = {"welding_speed": -0.02, "pressure": 0.01}
-        elif prediction.risk_level == "medium":
-            adjustments = {"welding_speed": -0.05, "current": 0.03, "pressure": 0.02}
-        elif prediction.risk_level == "high":
-            adjustments = {"welding_speed": -0.07, "current": 0.05, "pressure": 0.03}
-        else:  # critical
-            adjustments = {"welding_speed": -0.10, "current": 0.07, "pressure": 0.05}
-
-        # LLM 응답에서 수정 (실제로는 정규표현식이나 JSON 파싱 사용)
-        # MVP에서는 기본값 사용
+        
+        # 1. JSON 파싱 시도
+        try:
+            # JSON 블록 추출 (```json ... ``` 또는 { ... } 형태)
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', llm_response, re.DOTALL)
+            if not json_match:
+                json_match = re.search(r'(\{.*?"adjustments".*?\})', llm_response, re.DOTALL)
+            
+            if json_match:
+                json_str = json_match.group(1)
+                data = json.loads(json_str)
+                
+                # adjustments 추출 및 변환 (백분율 → 소수)
+                if "adjustments" in data:
+                    for param, value in data["adjustments"].items():
+                        adjustments[param] = float(value) / 100.0
+                    
+                    logger.info(f"✓ JSON 파싱 성공: {adjustments}")
+                    return adjustments
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON 파싱 실패: {e}")
+        except Exception as e:
+            logger.warning(f"JSON 처리 오류: {e}")
+        
+        # 2. 정규표현식 폴백
+        patterns = {
+            "welding_speed": [
+                r'"welding_speed":\s*([+-]?\d+\.?\d*)',
+                r"welding[_\s]?speed[:\s]+([+-]?\d+\.?\d*)\s*%",
+            ],
+            "current": [
+                r'"current":\s*([+-]?\d+\.?\d*)',
+                r"current[:\s]+([+-]?\d+\.?\d*)\s*%",
+            ],
+            "pressure": [
+                r'"pressure":\s*([+-]?\d+\.?\d*)',
+                r"pressure[:\s]+([+-]?\d+\.?\d*)\s*%",
+            ]
+        }
+        
+        for param, pattern_list in patterns.items():
+            for pattern in pattern_list:
+                match = re.search(pattern, llm_response, re.IGNORECASE)
+                if match:
+                    value = float(match.group(1))
+                    # 값이 -1~1 범위면 이미 소수, 아니면 백분율로 간주
+                    if abs(value) > 1:
+                        value = value / 100.0
+                    adjustments[param] = value
+                    logger.info(f"✓ 정규식 파싱: {param} = {value:.3f}")
+                    break
+        
+        # 3. 파싱 실패 시 위험도 기반 기본 조정값 사용
+        if not adjustments:
+            logger.warning(f"LLM 응답 파싱 실패. 기본값 사용.")
+            logger.debug(f"LLM 응답:\n{llm_response[:500]}")
+            if prediction.risk_level == "low":
+                adjustments = {"welding_speed": -0.02, "pressure": 0.01}
+            elif prediction.risk_level == "medium":
+                adjustments = {"welding_speed": -0.05, "current": 0.03, "pressure": 0.02}
+            elif prediction.risk_level == "high":
+                adjustments = {"welding_speed": -0.08, "current": 0.05, "pressure": 0.04}
+            else:  # critical
+                adjustments = {"welding_speed": -0.12, "current": 0.08, "pressure": 0.06}
 
         return adjustments
 

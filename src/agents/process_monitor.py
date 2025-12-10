@@ -208,6 +208,60 @@ class ProcessMonitorAgent:
 
         return None
 
+    def is_anomaly_detected(self, predicted_strength: float, predicted_quality_score: float = None) -> bool:
+        """
+        이상 감지 판단 (MVP 설계 + 비용 최적화)
+
+        비용 고려사항:
+        - 실제 불량률 1.8% → 이상 탐지율 목표 3-5%
+        - 불필요한 조정 최소화 → 생산성 유지, LLM API 비용 절감
+
+        감지 기준 (보수적):
+        1. LSL/USL 범위 벗어남 (명백한 불량)
+        2. 품질 점수 < 0.85 (심각한 품질 저하)
+        3. LSL/USL 근접 (불량 직전)
+
+        Args:
+            predicted_strength: ML 모델이 예측한 강도
+            predicted_quality_score: 예측 품질 점수 (0~1, optional)
+
+        Returns:
+            이상 여부 (True: 조정 필요, False: 정상)
+        """
+        lsl = settings.welding_strength_lsl  # 11.50 (불량 기준)
+        usl = settings.welding_strength_usl  # 13.20 (불량 기준)
+
+        # ========================================
+        # 1단계: 명백한 불량 (LSL/USL 범위 벗어남)
+        # ========================================
+        if predicted_strength < lsl or predicted_strength > usl:
+            return True  # 이미 불량 → 즉시 조정 필요
+
+        # ========================================
+        # 2단계: 심각한 품질 저하 (보수적 기준)
+        # ========================================
+        if predicted_quality_score is not None:
+            warning_threshold = settings.anomaly_warning_quality  # 0.85
+            if predicted_quality_score < warning_threshold:
+                return True  # 심각한 품질 저하 → 사전 조정
+
+        # ========================================
+        # 3단계: LSL/USL 근접 (불량 직전 예방)
+        # ========================================
+        lsl_buffer = settings.lsl_safety_buffer  # 0.20
+        usl_buffer = settings.usl_safety_buffer  # 0.20
+
+        # LSL에 너무 가까움
+        if predicted_strength < (lsl + lsl_buffer):  # 11.70 미만
+            return True  # 불량 직전 → 사전 조정
+
+        # USL에 너무 가까움
+        if predicted_strength > (usl - usl_buffer):  # 13.00 초과
+            return True  # 불량 직전 → 사전 조정
+
+        # 모든 기준 통과: 정상
+        return False
+
     def get_alert_summary(self) -> Dict:
         """알림 요약 정보 반환"""
         if not self.alert_history:
