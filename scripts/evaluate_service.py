@@ -220,18 +220,34 @@ class ServiceEvaluator:
 
     def detect_anomaly(self, raw_row: Dict[str, float]) -> bool:
         """
-        이상 감지 (실제 서비스 에이전트 사용)
+        이상 감지 (MVP 시나리오: 2단계 cascade detection)
+
+        1단계: 프레스 공정 이상 감지 (1차 필터)
+        2단계: 용접 품질 영향 예측 (cascade effect)
 
         Args:
             raw_row: 원본 피처 딕셔너리
 
         Returns:
-            이상 여부 (예측 불량 시 True)
+            이상 여부 (조정 필요 시 True)
         """
-        # ML 모델로 품질 예측
+        # ========================================
+        # 1단계: 프레스 공정 이상 감지 (MVP 1차 필터)
+        # ========================================
+        press_thickness = raw_row.get('press_thickness', 0.0)
+        press_anomaly = self.process_monitor.check_press_data_anomaly(press_thickness)
+
+        if not press_anomaly:
+            # 프레스 정상이면 조정 불필요 (즉시 반환)
+            return False
+
+        # ========================================
+        # 2단계: 용접 품질 영향 예측 (cascade effect)
+        # ========================================
+        # ML 모델로 최종 품질 예측 (프레스 이상이 용접에 미칠 영향)
         prediction = self.predict_quality(raw_row)
 
-        # ProcessMonitor의 이상 감지 로직 사용 (MVP 설계: quality_score도 전달)
+        # 품질 저하 예상되면 조정 필요
         return self.process_monitor.is_anomaly_detected(
             predicted_strength=prediction.predicted_strength,
             predicted_quality_score=prediction.predicted_quality_score
@@ -335,12 +351,16 @@ class ServiceEvaluator:
             baseline_pred_obj = self.predict_quality(raw_row)
             baseline_pred = baseline_pred_obj.predicted_strength
 
-            # 디버그: 처음 10개 샘플 로깅
+            # 디버그: 처음 10개 샘플 로깅 (MVP 2단계 구조 표시)
             if i < 10:
+                press_thickness = raw_row.get('press_thickness', 0.0)
+                press_anomaly = self.process_monitor.check_press_data_anomaly(press_thickness)
                 logger.info(
-                    f"샘플 {i}: pred_strength={baseline_pred:.4f}, "
+                    f"샘플 {i}: press_thickness={press_thickness:.4f}mm, "
+                    f"press_anomaly={press_anomaly}, "
+                    f"pred_strength={baseline_pred:.4f}, "
                     f"quality_score={baseline_pred_obj.predicted_quality_score:.4f}, "
-                    f"is_anomaly={is_anomaly}, risk={baseline_pred_obj.risk_level}"
+                    f"final_anomaly={is_anomaly}"
                 )
 
             decision_status = "skipped"

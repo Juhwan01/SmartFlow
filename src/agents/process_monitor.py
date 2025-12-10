@@ -208,6 +208,35 @@ class ProcessMonitorAgent:
 
         return None
 
+    def check_press_data_anomaly(self, press_thickness: float) -> bool:
+        """
+        1차 공정(프레스) 이상 감지 (MVP 시나리오 - 데이터 기반 통계 임계값)
+
+        프레스 공정에서 두께가 정상 범위(5-95% 분위수)를 벗어나면 이상으로 감지.
+        실제 데이터 분석 결과:
+        - 5-95% 범위: 0.6111 ~ 0.6279mm
+        - 범위 벗어남: 8.7% 감지, 불량률 4.8% (정상의 2.7배)
+
+        Args:
+            press_thickness: 프레스 두께 측정값 (mm)
+
+        Returns:
+            이상 여부 (True: 프레스 이상, False: 정상)
+        """
+        # 통계 기반 임계값 (실제 데이터 분석)
+        q05 = settings.press_thickness_q05  # 0.6111mm
+        q95 = settings.press_thickness_q95  # 0.6279mm
+
+        # 5-95% 범위 벗어나면 이상
+        if press_thickness < q05 or press_thickness > q95:
+            logger.debug(
+                f"프레스 이상 감지: 두께={press_thickness:.4f}mm "
+                f"(정상 범위: {q05:.4f}~{q95:.4f}mm)"
+            )
+            return True
+
+        return False
+
     def is_anomaly_detected(self, predicted_strength: float, predicted_quality_score: float = None) -> bool:
         """
         이상 감지 판단 (MVP 설계 + 비용 최적화)

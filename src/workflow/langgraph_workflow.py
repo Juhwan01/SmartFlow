@@ -69,8 +69,26 @@ class SmartFlowWorkflow:
 
         logger.info("SmartFlow Workflow 초기화 완료")
 
+    def _should_continue_to_predict(self, state: WorkflowState) -> str:
+        """
+        프레스 이상 여부에 따라 다음 단계 결정 (MVP 2단계 cascade detection)
+
+        프레스 정상이면 조정 불필요 → 즉시 종료
+        프레스 이상이면 품질 예측 진행 → cascade effect 분석
+        """
+        press_data = state.get("press_data", {})
+        is_anomaly = press_data.get("is_anomaly", False)
+
+        if is_anomaly:
+            logger.info("프레스 이상 감지 → 품질 예측 단계로 진행")
+            return "predict"
+        else:
+            logger.info("프레스 정상 → 조정 불필요, 워크플로우 종료")
+            state["workflow_status"] = "normal_operation_no_adjustment"
+            return END
+
     def _build_workflow(self) -> StateGraph:
-        """워크플로우 그래프 구성"""
+        """워크플로우 그래프 구성 (MVP 2단계 cascade detection)"""
         workflow = StateGraph(WorkflowState)
 
         # 노드 추가
@@ -80,9 +98,19 @@ class SmartFlowWorkflow:
         workflow.add_node("coordinate", self._coordinate_node)
         workflow.add_node("execute", self._execute_node)
 
-        # 엣지 추가 (흐름 정의)
+        # 엣지 추가 (MVP 시나리오: 프레스 정상이면 즉시 종료)
         workflow.set_entry_point("monitor")
-        workflow.add_edge("monitor", "predict")
+
+        # 조건부 라우팅: 프레스 이상 여부에 따라 분기
+        workflow.add_conditional_edges(
+            "monitor",
+            self._should_continue_to_predict,
+            {
+                "predict": "predict",
+                END: END
+            }
+        )
+
         workflow.add_edge("predict", "negotiate")
         workflow.add_edge("negotiate", "coordinate")
         workflow.add_edge("coordinate", "execute")

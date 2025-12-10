@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     lsl_safety_buffer: float = Field(default=0.20, env="LSL_SAFETY_BUFFER")  # LSL + 0.20 미만이면 경고
     usl_safety_buffer: float = Field(default=0.20, env="USL_SAFETY_BUFFER")  # USL - 0.20 초과이면 경고
 
+    # Press Process Anomaly Detection (MVP 1차 공정 감지)
+    # 실제 데이터 분석 기반: 평균 0.6173mm, 5-95% 범위 0.6111~0.6279mm
+    # 5-95% 범위 벗어남 → 8.7% 감지, 불량률 4.8% (정상의 2.7배)
+    press_thickness_q05: float = Field(default=0.6111, env="PRESS_THICKNESS_Q05")  # 5% 분위수
+    press_thickness_q95: float = Field(default=0.6279, env="PRESS_THICKNESS_Q95")  # 95% 분위수
+
     # Sensor Simulation Configuration
     press_thickness_mean: float = Field(default=2.0, env="PRESS_THICKNESS_MEAN")
     press_thickness_std: float = Field(default=0.01, env="PRESS_THICKNESS_STD")
