@@ -29,8 +29,11 @@ class ManufacturingDataProcessor:
         self.variable_mapping = {
             # Stage 1 Output (프레스 공정 출력) - 주요 측정값
             "press_thickness": "Stage1.Output.Measurement0.U.Actual",  # 두께 (주요 관심 변수)
+            "press_thickness_setpoint": "Stage1.Output.Measurement0.U.Setpoint",
             "press_measurement1": "Stage1.Output.Measurement1.U.Actual",
+            "press_measurement1_setpoint": "Stage1.Output.Measurement1.U.Setpoint",
             "press_measurement2": "Stage1.Output.Measurement2.U.Actual",
+            "press_measurement2_setpoint": "Stage1.Output.Measurement2.U.Setpoint",
 
             # Machine4 (용접 공정 제어 변수)
             "welding_temp1": "Machine4.Temperature1.C.Actual",  # 전류에 해당 (온도와 상관)
@@ -44,8 +47,83 @@ class ManufacturingDataProcessor:
 
             # Stage 2 Output (용접 공정 출력) - 예측 타겟만 사용
             "welding_strength": "Stage2.Output.Measurement0.U.Actual",  # 용접 강도 (주요 타겟)
+            "welding_strength_setpoint": "Stage2.Output.Measurement0.U.Setpoint",
             # 주의: welding_measurement1, welding_measurement2는 Data Leakage를 유발하므로 제거!
         }
+
+        additional_mapping = {
+            # 공정 환경
+            "ambient_temperature": "AmbientConditions.AmbientTemperature.U.Actual",
+            "ambient_humidity": "AmbientConditions.AmbientHumidity.U.Actual",
+
+            # Combiner 단계
+            "combiner_temp1": "FirstStage.CombinerOperation.Temperature1.U.Actual",
+            "combiner_temp2": "FirstStage.CombinerOperation.Temperature2.U.Actual",
+            "combiner_temp3": "FirstStage.CombinerOperation.Temperature3.C.Actual",
+
+            # Machine4 확장 센서
+            "welding_temp4": "Machine4.Temperature4.C.Actual",
+            "welding_temp5": "Machine4.Temperature5.C.Actual",
+            "welding_exit_temp": "Machine4.ExitTemperature.U.Actual",
+
+            # Machine5 확장 센서
+            "machine5_temp3": "Machine5.Temperature3.C.Actual",
+            "machine5_temp4": "Machine5.Temperature4.C.Actual",
+            "machine5_temp5": "Machine5.Temperature5.C.Actual",
+            "machine5_temp6": "Machine5.Temperature6.C.Actual",
+            "machine5_exit_temp": "Machine5.ExitTemperature.U.Actual",
+
+            # Machine1 공정 변수
+            "machine1_raw_property1": "Machine1.RawMaterial.Property1",
+            "machine1_raw_property2": "Machine1.RawMaterial.Property2",
+            "machine1_raw_property3": "Machine1.RawMaterial.Property3",
+            "machine1_raw_property4": "Machine1.RawMaterial.Property4",
+            "machine1_feeder_param": "Machine1.RawMaterialFeederParameter.U.Actual",
+            "machine1_zone1_temp": "Machine1.Zone1Temperature.C.Actual",
+            "machine1_zone2_temp": "Machine1.Zone2Temperature.C.Actual",
+            "machine1_motor_amperage": "Machine1.MotorAmperage.U.Actual",
+            "machine1_motor_rpm": "Machine1.MotorRPM.C.Actual",
+            "machine1_material_pressure": "Machine1.MaterialPressure.U.Actual",
+            "machine1_material_temp": "Machine1.MaterialTemperature.U.Actual",
+            "machine1_exit_temp": "Machine1.ExitZoneTemperature.C.Actual",
+
+            # Machine2 공정 변수
+            "machine2_raw_property1": "Machine2.RawMaterial.Property1",
+            "machine2_raw_property2": "Machine2.RawMaterial.Property2",
+            "machine2_raw_property3": "Machine2.RawMaterial.Property3",
+            "machine2_raw_property4": "Machine2.RawMaterial.Property4",
+            "machine2_feeder_param": "Machine2.RawMaterialFeederParameter.U.Actual",
+            "machine2_zone1_temp": "Machine2.Zone1Temperature.C.Actual",
+            "machine2_zone2_temp": "Machine2.Zone2Temperature.C.Actual",
+            "machine2_motor_amperage": "Machine2.MotorAmperage.U.Actual",
+            "machine2_motor_rpm": "Machine2.MotorRPM.C.Actual",
+            "machine2_material_pressure": "Machine2.MaterialPressure.U.Actual",
+            "machine2_material_temp": "Machine2.MaterialTemperature.U.Actual",
+            "machine2_exit_temp": "Machine2.ExitZoneTemperature.C.Actual",
+
+            # Machine3 공정 변수
+            "machine3_raw_property1": "Machine3.RawMaterial.Property1",
+            "machine3_raw_property2": "Machine3.RawMaterial.Property2",
+            "machine3_raw_property3": "Machine3.RawMaterial.Property3",
+            "machine3_raw_property4": "Machine3.RawMaterial.Property4",
+            "machine3_feeder_param": "Machine3.RawMaterialFeederParameter.U.Actual",
+            "machine3_zone1_temp": "Machine3.Zone1Temperature.C.Actual",
+            "machine3_zone2_temp": "Machine3.Zone2Temperature.C.Actual",
+            "machine3_motor_amperage": "Machine3.MotorAmperage.U.Actual",
+            "machine3_motor_rpm": "Machine3.MotorRPM.C.Actual",
+            "machine3_material_pressure": "Machine3.MaterialPressure.U.Actual",
+            "machine3_material_temp": "Machine3.MaterialTemperature.U.Actual",
+            "machine3_exit_temp": "Machine3.ExitZoneTemperature.C.Actual",
+        }
+
+        self.variable_mapping.update(additional_mapping)
+
+        # Stage1 측정값 3~14 추가 매핑 (세트포인트 포함)
+        for idx in range(3, 15):
+            actual_col = f"Stage1.Output.Measurement{idx}.U.Actual"
+            setpoint_col = f"Stage1.Output.Measurement{idx}.U.Setpoint"
+            self.variable_mapping[f"stage1_measurement{idx}"] = actual_col
+            self.variable_mapping[f"stage1_measurement{idx}_setpoint"] = setpoint_col
 
         logger.info(f"DataProcessor 초기화 - CSV: {csv_path}")
 
@@ -108,15 +186,16 @@ class ManufacturingDataProcessor:
         logger.info(f"Feature 목록: {feature_cols}")
         logger.info(f"Target: {target_col}")
 
-        # 정규화 (0~1)
-        X_scaled = self.scaler.fit_transform(X)
-
-        # Train/Test 분할
+        # Train/Test 분할 (스케일링 전) - 데이터 누수 방지
         X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y,
+            X, y,
             test_size=test_size,
             random_state=random_state
         )
+
+        # 정규화 (0~1) - 학습 데이터 기준으로 Fit
+        X_train = self.scaler.fit_transform(X_train)
+        X_test = self.scaler.transform(X_test)
 
         logger.info(f"Train set: {X_train.shape}")
         logger.info(f"Test set: {X_test.shape}")

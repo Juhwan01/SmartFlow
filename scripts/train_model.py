@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 import numpy as np
 import pandas as pd
 import pickle
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 import xgboost as xgb
@@ -57,6 +57,114 @@ class ModelTrainer:
 
         # 4. 프레스 공정의 면적/부피 유사 변수
         df_fe['press_volume_proxy'] = df_fe['press_thickness'] * df_fe['press_measurement1']
+
+        # 5. 전체 세트포인트 대비 편차/비율 특성 생성 (타깃 열 제외)
+        target_col = 'welding_strength'
+        setpoint_cols = [col for col in df_fe.columns if col.endswith('_setpoint')]
+        for setpoint_col in setpoint_cols:
+            actual_col = setpoint_col.replace('_setpoint', '')
+            if actual_col == target_col:
+                continue  # 타깃 유출 방지
+            if actual_col in df_fe.columns:
+                error_col = f"{actual_col}_error"
+                ratio_col = f"{actual_col}_ratio"
+                df_fe[error_col] = df_fe[actual_col] - df_fe[setpoint_col]
+                df_fe[ratio_col] = np.where(
+                    df_fe[setpoint_col] != 0,
+                    df_fe[actual_col] / df_fe[setpoint_col],
+                    1.0
+                )
+
+        # Stage1 측정치 집계 통계
+        stage_error_cols = [
+            col for col in df_fe.columns
+            if col.startswith('stage1_measurement') and col.endswith('_error')
+        ]
+        if stage_error_cols:
+            stage_error_df = df_fe[stage_error_cols]
+            df_fe['stage1_error_mean'] = stage_error_df.mean(axis=1)
+            df_fe['stage1_error_std'] = stage_error_df.std(axis=1).fillna(0)
+            df_fe['stage1_error_abs_max'] = stage_error_df.abs().max(axis=1)
+
+        stage_ratio_cols = [
+            col for col in df_fe.columns
+            if col.startswith('stage1_measurement') and col.endswith('_ratio')
+        ]
+        if stage_ratio_cols:
+            stage_ratio_df = df_fe[stage_ratio_cols]
+            df_fe['stage1_ratio_mean'] = stage_ratio_df.mean(axis=1)
+            df_fe['stage1_ratio_std'] = stage_ratio_df.std(axis=1).fillna(0)
+
+        # Machine별 Derived Features
+        def add_diff(col_a, col_b, new_col):
+            if col_a in df_fe.columns and col_b in df_fe.columns:
+                df_fe[new_col] = df_fe[col_a] - df_fe[col_b]
+
+        add_diff('machine1_zone1_temp', 'machine1_zone2_temp', 'machine1_zone_temp_diff')
+        add_diff('machine2_zone1_temp', 'machine2_zone2_temp', 'machine2_zone_temp_diff')
+        add_diff('machine3_zone1_temp', 'machine3_zone2_temp', 'machine3_zone_temp_diff')
+        add_diff('welding_temp5', 'welding_temp1', 'welding_temp_span')
+        add_diff('combiner_temp3', 'combiner_temp1', 'combiner_temp_gradient')
+
+        def add_power_proxy(amperage_col, rpm_col, new_col):
+            if amperage_col in df_fe.columns and rpm_col in df_fe.columns:
+                df_fe[new_col] = df_fe[amperage_col] * df_fe[rpm_col]
+
+        add_power_proxy('machine1_motor_amperage', 'machine1_motor_rpm', 'machine1_power_proxy')
+        add_power_proxy('machine2_motor_amperage', 'machine2_motor_rpm', 'machine2_power_proxy')
+        add_power_proxy('machine3_motor_amperage', 'machine3_motor_rpm', 'machine3_power_proxy')
+
+        # Raw material 조성 평균
+        for prop_idx in range(1, 5):
+            cols = [
+                f"machine{machine_idx}_raw_property{prop_idx}"
+                for machine_idx in (1, 2, 3)
+                if f"machine{machine_idx}_raw_property{prop_idx}" in df_fe.columns
+            ]
+            if len(cols) >= 2:
+                df_fe[f"raw_property{prop_idx}_avg"] = df_fe[cols].mean(axis=1)
+
+        # Ambient & Welding 환경 지수
+        if {'ambient_temperature', 'ambient_humidity'} <= set(df_fe.columns):
+            df_fe['ambient_index'] = (
+                df_fe['ambient_temperature'] * 0.7 + df_fe['ambient_humidity'] * 0.3
+            )
+
+        temp_features = [col for col in ['welding_temp1', 'welding_temp2', 'welding_temp3', 'welding_temp4', 'welding_temp5'] if col in df_fe.columns]
+        if temp_features:
+            df_fe['welding_temp_mean'] = df_fe[temp_features].mean(axis=1)
+
+        machine5_temps = [col for col in ['machine5_temp3', 'machine5_temp4', 'machine5_temp5', 'machine5_temp6'] if col in df_fe.columns]
+        if machine5_temps:
+            df_fe['machine5_temp_mean'] = df_fe[machine5_temps].mean(axis=1)
+
+        # Temporal Features (1-step lag, rolling mean, trend)
+        temporal_cols = [
+            'press_thickness',
+            'stage1_error_mean',
+            'welding_temp1',
+            'welding_temp3',
+            'welding_pressure',
+            'ambient_temperature'
+        ]
+
+        for col in temporal_cols:
+            if col in df_fe.columns:
+                lag_col = f"{col}_lag1"
+                roll_col = f"{col}_roll3"
+                trend_col = f"{col}_trend"
+                df_fe[lag_col] = df_fe[col].shift(1)
+                df_fe[roll_col] = df_fe[col].rolling(window=3, min_periods=1).mean()
+                df_fe[lag_col] = df_fe[lag_col].fillna(df_fe[col])
+                df_fe[roll_col] = df_fe[roll_col].fillna(df_fe[col])
+                df_fe[trend_col] = df_fe[col] - df_fe[lag_col]
+
+        # 세트포인트 컬럼 드롭 (누설 방지)
+        drop_cols = [col for col in df_fe.columns if col.endswith('_setpoint')]
+        df_fe = df_fe.drop(columns=drop_cols, errors='ignore')
+
+        # 남은 결측치 처리
+        df_fe = df_fe.ffill().bfill()
 
         return df_fe
 
@@ -102,13 +210,30 @@ class ModelTrainer:
 
         logger.info(f"데이터 분할: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
 
-        # 6. Test 데이터 저장 (최종 평가용)
+        # 6. Train/Val/Test 데이터 저장
+        data_dir = Path("data")
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Train 데이터 저장 (RAG용)
+        train_df = pd.DataFrame(X_train, columns=feature_cols)
+        train_df[target_col] = y_train
+        train_path = data_dir / "train_set.csv"
+        train_df.to_csv(train_path, index=False)
+        logger.info(f"✅ Train 데이터 저장: {train_path} ({len(train_df)} samples, RAG용)")
+
+        # Validation 데이터 저장
+        val_df = pd.DataFrame(X_val, columns=feature_cols)
+        val_df[target_col] = y_val
+        val_path = data_dir / "val_set.csv"
+        val_df.to_csv(val_path, index=False)
+        logger.info(f"✅ Validation 데이터 저장: {val_path} ({len(val_df)} samples)")
+
+        # Test 데이터 저장 (최종 평가용)
         test_df = pd.DataFrame(X_test, columns=feature_cols)
         test_df[target_col] = y_test
-        test_path = Path("data/test_set.csv")
-        test_path.parent.mkdir(parents=True, exist_ok=True)
+        test_path = data_dir / "test_set.csv"
         test_df.to_csv(test_path, index=False)
-        logger.info(f"✅ Test 데이터 저장: {test_path} (최종 평가용, 절대 재학습 금지)")
+        logger.info(f"✅ Test 데이터 저장: {test_path} ({len(test_df)} samples, 최종 평가용, 절대 재학습 금지)")
 
         # 6-1. Sample Weighting 계산 (불량품 강조 학습)
         # ===================================================================
@@ -126,7 +251,12 @@ class ModelTrainer:
 
         # 가중치 계산: 불량 샘플에 정상/불량 비율만큼 가중치 부여
         if num_defects > 0:
-            defect_weight = num_normal / num_defects
+            raw_weight = num_normal / num_defects
+            defect_weight = min(raw_weight, 50.0)
+            if defect_weight < raw_weight:
+                logger.info(
+                    f"  - 불량 가중치 캡 적용: 원래 {raw_weight:.1f} -> 사용 {defect_weight:.1f}"
+                )
         else:
             defect_weight = 1.0
 
@@ -171,13 +301,11 @@ class ModelTrainer:
 
         self.metrics = {
             "train": {
-                "r2": r2_score(y_train, y_pred_train),
                 "mae": mean_absolute_error(y_train, y_pred_train),
                 "rmse": np.sqrt(mean_squared_error(y_train, y_pred_train)),
                 "mape": self._calculate_mape(y_train, y_pred_train)
             },
             "validation": {
-                "r2": r2_score(y_val, y_pred_val),
                 "mae": mean_absolute_error(y_val, y_pred_val),
                 "rmse": np.sqrt(mean_squared_error(y_val, y_pred_val)),
                 "mape": self._calculate_mape(y_val, y_pred_val)
@@ -194,7 +322,6 @@ class ModelTrainer:
         logger.info("=" * 70)
         logger.info(f"✅ MAE (평균 오차): {self.metrics['validation']['mae']:.4f} (목표: < 0.2)")
         logger.info(f"✅ MAPE (오차율)  : {self.metrics['validation']['mape']:.2f}%  (목표: < 2%)")
-        logger.info(f"ℹ️  R² Score     : {self.metrics['validation']['r2']:.4f}")
         logger.info("=" * 70)
         logger.info("⚠️  Test 데이터 평가는 scripts/evaluate_final.py에서 단 1회만 수행합니다.")
         logger.info("=" * 70)
@@ -246,7 +373,6 @@ def main():
 
     print(f"✅ Validation MAE  : {mae_score:.4f} (목표: < 0.2)")
     print(f"✅ Validation MAPE : {mape_score:.2f}% (목표: < 2.0%)")
-    print(f"ℹ️  Validation R²   : {metrics['validation']['r2']:.4f}")
 
     if mae_score < 0.2:
         print("\n🎉 목표 달성! 현장 투입 가능한 초정밀 예측 성능을 확보했습니다.")

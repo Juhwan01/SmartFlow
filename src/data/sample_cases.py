@@ -5,8 +5,11 @@ RAG 시스템에서 사용할 과거 성공/실패 사례를 정의합니다.
 """
 from typing import List, Dict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
+from pathlib import Path
 import json
+
+from loguru import logger
 
 
 @dataclass
@@ -26,8 +29,8 @@ class HistoricalCase:
     lessons_learned: str
 
 
-def get_historical_cases() -> List[HistoricalCase]:
-    """과거 사례 목록 반환"""
+def _get_builtin_cases() -> List[HistoricalCase]:
+    """코드에 내장된 기본 사례 목록"""
 
     cases = [
         # 성공 사례들
@@ -184,9 +187,57 @@ def get_historical_cases() -> List[HistoricalCase]:
     return cases
 
 
+def _load_cases_from_json(filepath: str = "data/historical_cases/cases.json") -> List[HistoricalCase]:
+    """JSON 파일에서 사례를 로드합니다 (없으면 빈 리스트 반환)."""
+    path = Path(filepath)
+    if not path.exists():
+        return []
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw_cases = json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"historical_cases JSON 로드 실패: {exc}")
+        return []
+
+    cases: List[HistoricalCase] = []
+    for item in raw_cases:
+        try:
+            cases.append(
+                HistoricalCase(
+                    case_id=item.get("case_id", ""),
+                    date=item.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    process_stage=item.get("process_stage", "press"),
+                    issue_detected=item.get("issue_detected", ""),
+                    issue_severity=item.get("issue_severity", "medium"),
+                    action_taken=item.get("action_taken", ""),
+                    parameters_adjusted=item.get("parameters_adjusted", {}),
+                    outcome=item.get("outcome", "success"),
+                    quality_before=float(item.get("quality_before", 0.0)),
+                    quality_after=float(item.get("quality_after", 0.0)),
+                    notes=item.get("notes", ""),
+                    lessons_learned=item.get("lessons_learned", ""),
+                )
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"historical_cases JSON 항목을 건너뜀({item}): {exc}")
+
+    return cases
+
+
+def get_historical_cases() -> List[HistoricalCase]:
+    """과거 사례 목록 반환 (JSON 우선, 없으면 기본값)"""
+    cases_from_file = _load_cases_from_json()
+    if cases_from_file:
+        return cases_from_file
+
+    logger.info("historical_cases JSON을 찾지 못해 내장 사례를 사용합니다.")
+    return _get_builtin_cases()
+
+
 def save_cases_to_json(filepath: str = "data/historical_cases/cases.json"):
     """과거 사례를 JSON 파일로 저장"""
-    cases = get_historical_cases()
+    cases = _get_builtin_cases()
 
     cases_dict = [
         {

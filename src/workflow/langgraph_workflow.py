@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph, END
 from loguru import logger
 
 from src.data.sensor_simulator import SensorSimulator
+from src.data.case_logger import CaseLogger
 from src.agents.process_monitor import ProcessMonitorAgent
 from src.agents.quality_predictor import QualityCascadePredictor
 from src.agents.negotiation_agent import NegotiationAgent
@@ -58,6 +59,7 @@ class SmartFlowWorkflow:
         self.rag_retriever = RAGRetriever()
         self.negotiator = NegotiationAgent(rag_retriever=self.rag_retriever)
         self.coordinator = CoordinatorAgent()
+        self.case_logger = CaseLogger()
 
         # RAG 초기화
         self.rag_retriever.initialize()
@@ -273,6 +275,68 @@ class SmartFlowWorkflow:
         state["workflow_status"] = "coordination_complete"
         return state
 
+    @staticmethod
+    def _format_adjustment_action(adjustments: Dict[str, float]) -> str:
+        if not adjustments:
+            return "조정 없음"
+        parts = []
+        for key, value in adjustments.items():
+            parts.append(f"{key} {value:+.1%}")
+        return ", ".join(parts)
+
+    def _log_success_case(self, state: WorkflowState) -> None:
+        execution = state.get("execution_result") or {}
+        if not execution.get("executed"):
+            return
+        if not execution.get("meets_threshold"):
+            return
+
+        prediction = state.get("prediction") or {}
+        proposal = state.get("proposal") or {}
+        decision = state.get("decision") or {}
+        alert = state.get("alert")
+        press_data = state.get("press_data") or {}
+
+        adjustments = execution.get("adjustments_applied") or proposal.get("adjustments") or {}
+        quality_before = float(round(prediction.get("predicted_quality_score", 0.0), 4))
+        quality_after = float(round(execution.get("final_quality_score", 0.0), 4))
+        quality_gain = float(round(quality_after - quality_before, 4))
+
+        severity = (alert or {}).get("severity") or prediction.get("risk_level") or "unknown"
+        issue_desc = (alert or {}).get("issue_description") or (
+            f"predicted_quality_drop ({prediction.get('risk_level', 'unknown')})"
+        )
+
+        entry = {
+            "process_stage": "composite_line",
+            "issue_detected": issue_desc,
+            "issue_severity": severity,
+            "action_taken": self._format_adjustment_action(adjustments),
+            "parameters_adjusted": {k: float(v) for k, v in adjustments.items()},
+            "outcome": "success",
+            "quality_before": quality_before,
+            "quality_after": quality_after,
+            "notes": f"decision={decision.get('status')}, alert={alert['alert_id'] if alert else 'none'}",
+            "lessons_learned": (
+                f"실시간 워크플로우에서 {severity} 이상을 {self._format_adjustment_action(adjustments)}로 대응해 "
+                f"품질을 {quality_before:.3f}→{quality_after:.3f}(Δ={quality_gain:+.3f})로 회복"
+            ),
+            "source_event_id": decision.get("decision_id"),
+            "decision_status": decision.get("status"),
+            "context_features": {
+                "press_thickness": press_data.get("thickness"),
+                "press_pressure": press_data.get("pressure"),
+                "press_temperature": press_data.get("temperature"),
+                "press_anomaly": press_data.get("is_anomaly"),
+                "alert_severity": severity,
+                "predicted_risk_level": prediction.get("risk_level"),
+                "predicted_strength": prediction.get("predicted_strength"),
+                "final_strength": execution.get("final_strength"),
+            }
+        }
+
+        self.case_logger.record_case(entry, source_id=decision.get("decision_id"))
+
     def _execute_node(self, state: WorkflowState) -> WorkflowState:
         """5단계: 파라미터 조정 실행 (시뮬레이션)"""
         logger.info("[5/5] 파라미터 조정 실행 시작")
@@ -316,6 +380,8 @@ class SmartFlowWorkflow:
                 "meets_threshold": quality_result["meets_threshold"],
                 "adjustments_applied": adjustments,
             }
+
+            self._log_success_case(state)
 
             logger.info(
                 f"조정 실행 완료 - 최종 품질: {quality_result['quality_score']:.2%}"
