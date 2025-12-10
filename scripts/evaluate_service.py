@@ -220,10 +220,13 @@ class ServiceEvaluator:
 
     def detect_anomaly(self, raw_row: Dict[str, float]) -> bool:
         """
-        이상 감지 (MVP 시나리오: 2단계 cascade detection)
+        이상 감지 (MVP 연쇄 불량 방지)
 
-        1단계: 프레스 공정 이상 감지 (1차 필터)
-        2단계: 용접 품질 영향 예측 (cascade effect)
+        1단계: 프레스 공정 이상 감지
+        2단계: cascade effect 예측 (프레스 이상 시에만)
+        3단계: 품질 저하 예상되면 조정
+
+        MVP 핵심: 프레스 이상 → 용접 품질 저하 cascade 예방
 
         Args:
             raw_row: 원본 피처 딕셔너리
@@ -232,22 +235,24 @@ class ServiceEvaluator:
             이상 여부 (조정 필요 시 True)
         """
         # ========================================
-        # 1단계: 프레스 공정 이상 감지 (MVP 1차 필터)
+        # 1단계: 프레스 공정 이상 감지
         # ========================================
         press_thickness = raw_row.get('press_thickness', 0.0)
         press_anomaly = self.process_monitor.check_press_data_anomaly(press_thickness)
 
         if not press_anomaly:
-            # 프레스 정상이면 조정 불필요 (즉시 반환)
+            # 프레스 정상 → 연쇄 불량 위험 없음 → 조정 불필요
             return False
 
         # ========================================
-        # 2단계: 용접 품질 영향 예측 (cascade effect)
+        # 2단계: cascade effect 예측
         # ========================================
-        # ML 모델로 최종 품질 예측 (프레스 이상이 용접에 미칠 영향)
+        # 프레스 이상이 용접 품질에 미칠 영향 예측
         prediction = self.predict_quality(raw_row)
 
-        # 품질 저하 예상되면 조정 필요
+        # ========================================
+        # 3단계: 품질 저하 예상되면 조정 필요
+        # ========================================
         return self.process_monitor.is_anomaly_detected(
             predicted_strength=prediction.predicted_strength,
             predicted_quality_score=prediction.predicted_quality_score
@@ -272,10 +277,17 @@ class ServiceEvaluator:
         raw_row: Dict[str, float],
         adjustments: Dict[str, float]
     ) -> Dict[str, float]:
-        """조정값 적용"""
+        """
+        조정값 적용 및 파생 변수 재계산
+
+        시계열 파생 변수(lag, roll, trend)는 과거 데이터 없이 재계산 불가능
+        → 기존 값 유지 (현실적 절충)
+
+        현재 값만으로 재계산 가능한 파생 변수만 업데이트
+        """
         adjusted = raw_row.copy()
 
-        # 파라미터 매핑
+        # 파라미터 매핑 및 조정
         param_mapping = {
             "welding_speed": "welding_temp3",
             "current": "welding_temp1",
@@ -286,10 +298,38 @@ class ServiceEvaluator:
             if adj_key in adjustments and feature_name in adjusted:
                 adjusted[feature_name] *= (1 + adjustments[adj_key])
 
-        # 파생 피처 재계산
+        # ========================================
+        # 파생 피처 재계산 (현재 값만으로 계산 가능한 것만)
+        # ========================================
+
+        # 1. heat_input_proxy = welding_temp1 / welding_temp3
         if {"welding_temp1", "welding_temp3"}.issubset(adjusted):
             denom = adjusted["welding_temp3"] if adjusted["welding_temp3"] != 0 else 1e-5
             adjusted["heat_input_proxy"] = adjusted["welding_temp1"] / denom
+
+        # 2. welding_temp_mean = mean(welding_temps)
+        welding_temp_cols = ["welding_temp1", "welding_temp2", "welding_temp3",
+                             "welding_temp4", "welding_temp5"]
+        if all(col in adjusted for col in welding_temp_cols):
+            adjusted["welding_temp_mean"] = sum(adjusted[col] for col in welding_temp_cols) / len(welding_temp_cols)
+
+        # 3. welding_temp_span = max - min
+        if "welding_temp_mean" in adjusted:  # welding_temp_cols가 모두 있다는 의미
+            temps = [adjusted[col] for col in welding_temp_cols]
+            adjusted["welding_temp_span"] = max(temps) - min(temps)
+
+        # 4. pressure_x_temp2 = welding_pressure * welding_temp2
+        if {"welding_pressure", "welding_temp2"}.issubset(adjusted):
+            adjusted["pressure_x_temp2"] = adjusted["welding_pressure"] * adjusted["welding_temp2"]
+
+        # 5. total_control = welding_control1 + welding_control2
+        if {"welding_control1", "welding_control2"}.issubset(adjusted):
+            adjusted["total_control"] = adjusted["welding_control1"] + adjusted["welding_control2"]
+
+        # 참고: 시계열 파생 변수 (재계산 불가능 → 기존 값 유지)
+        # - welding_temp1_lag1, welding_temp1_roll3, welding_temp1_trend
+        # - welding_temp3_lag1, welding_temp3_roll3, welding_temp3_trend
+        # - welding_pressure_lag1, welding_pressure_roll3, welding_pressure_trend
 
         return adjusted
 

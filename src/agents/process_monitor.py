@@ -88,16 +88,25 @@ class ProcessMonitorAgent:
         force_anomaly: bool = False
     ) -> tuple[PressSensorData, Optional[AlertMessage]]:
         """
-        프레스 공정 모니터링
+        프레스 공정 모니터링 (MVP 데이터 기반 통계 임계값 사용)
 
         Args:
-            force_anomaly: 강제로 이상 발생시키기
+            force_anomaly: 강제로 이상 발생시키기 (테스트용, 실제로는 데이터 기반 판정 사용)
 
         Returns:
             (센서 데이터, 알림 메시지) 튜플
         """
         # 센서 데이터 수집
         sensor_data = self.simulator.generate_press_data(force_anomaly=force_anomaly)
+
+        # ✅ MVP: 데이터 기반 통계 임계값으로 실제 이상 여부 재판정
+        # simulator의 random is_anomaly를 무시하고 실제 데이터 기반으로 판정
+        actual_is_anomaly = self.check_press_data_anomaly(sensor_data.thickness)
+
+        # sensor_data의 is_anomaly를 실제 판정 결과로 덮어쓰기
+        sensor_data.is_anomaly = actual_is_anomaly
+        if actual_is_anomaly and not sensor_data.anomaly_type:
+            sensor_data.anomaly_type = "thickness_deviation"
 
         # 이상 감지
         alert = None
