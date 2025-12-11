@@ -3,18 +3,29 @@ LangGraph 기반 Multi-Agent 워크플로우
 
 전체 시스템을 조율하는 워크플로우
 """
-from typing import TypedDict, Annotated, Dict, Any
+from typing import TypedDict, Annotated, Dict, Any, Optional
 from typing_extensions import Annotated
 from langgraph.graph import StateGraph, END
 from loguru import logger
+from datetime import datetime
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import pickle
 
-from src.data.sensor_simulator import SensorSimulator
+from src.data.sensor_simulator import SensorSimulator, PressSensorData
 from src.data.case_logger import CaseLogger
 from src.agents.process_monitor import ProcessMonitorAgent
 from src.agents.quality_predictor import QualityCascadePredictor
 from src.agents.negotiation_agent import NegotiationAgent
-from src.agents.coordinator import CoordinatorAgent, ProductionGoals
+from src.agents.coordinator import CoordinatorAgent
 from src.rag.retriever import RAGRetriever
+from config import settings
+from config.data_schema import get_schema
+from src.features import FeatureEngineer
+from src.adjustment.parameter_adapter import ParameterAdapter
+
+project_root = Path(__file__).resolve().parents[2]
 
 
 # 전역 상태 정의
@@ -43,6 +54,8 @@ class WorkflowState(TypedDict):
     # 메타 정보
     workflow_status: str
     error_message: str
+    ml_row: Optional[Dict[str, Any]]
+    ml_row_adjusted: Optional[Dict[str, Any]]
 
 
 class SmartFlowWorkflow:
@@ -60,6 +73,17 @@ class SmartFlowWorkflow:
         self.negotiator = NegotiationAgent(rag_retriever=self.rag_retriever)
         self.coordinator = CoordinatorAgent()
         self.case_logger = CaseLogger()
+        self.schema = get_schema()
+        self.feature_engineer = FeatureEngineer(self.schema)
+        self.parameter_adapter = ParameterAdapter(self.schema, self.feature_engineer)
+
+        self.ml_dataset = None
+        self.ml_feature_cols: list[str] = []
+        self.ml_target_col = "welding_strength"
+        self.ml_scaler = None
+        self.ml_model = None
+        self.ml_context_available = False
+        self._load_ml_context()
 
         # RAG 초기화
         self.rag_retriever.initialize()
@@ -118,12 +142,176 @@ class SmartFlowWorkflow:
 
         return workflow.compile()
 
+    def _load_ml_context(self) -> None:
+        """대시보드와 동일한 ML 모델/데이터 컨텍스트 로드"""
+        dataset_candidates = [
+            project_root / "data" / "uploaded_data.csv",
+            project_root / "data" / "test_set.csv"
+        ]
+
+        dataset_path = None
+        for candidate in dataset_candidates:
+            if candidate.exists():
+                dataset_path = candidate
+                break
+
+        if dataset_path is None:
+            logger.warning("ML 데이터셋을 찾을 수 없어 시뮬레이터 기반으로 동작합니다.")
+            return
+
+        try:
+            self.ml_dataset = pd.read_csv(dataset_path)
+            logger.info(f"ML 워크로드 데이터셋 로드: {dataset_path} ({len(self.ml_dataset)} rows)")
+        except Exception as exc:
+            logger.warning(f"데이터셋 로드 실패: {exc}")
+            self.ml_dataset = None
+            return
+
+        if "welding_strength" in self.ml_dataset.columns:
+            self.ml_target_col = "welding_strength"
+        else:
+            self.ml_target_col = None
+
+        if self.ml_target_col:
+            self.ml_feature_cols = [
+                col for col in self.ml_dataset.columns if col != self.ml_target_col
+            ]
+        else:
+            self.ml_feature_cols = list(self.ml_dataset.columns)
+
+        scaler_path = project_root / "models" / "scaler.pkl"
+        model_path = project_root / "models" / "quality_predictor.pkl"
+
+        try:
+            with open(scaler_path, 'rb') as f:
+                self.ml_scaler = pickle.load(f)
+            with open(model_path, 'rb') as f:
+                self.ml_model = pickle.load(f)
+            self.ml_context_available = True
+            logger.info("ML 모델/스케일러 로드 완료 (대시보드와 동일한 컨텍스트 사용)")
+        except FileNotFoundError as exc:
+            logger.warning(f"ML 모델 파일을 찾을 수 없습니다: {exc}")
+            self.ml_context_available = False
+        except Exception as exc:
+            logger.warning(f"ML 모델 로드 실패: {exc}")
+            self.ml_context_available = False
+
+    def _add_negotiation_log(
+        self,
+        state: WorkflowState,
+        role: str,
+        label: str,
+        message: str,
+        status: str = "info",
+        meta: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """협상 단계별 진행 로그를 축적"""
+        entry = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "role": role,
+            "label": label,
+            "message": message.strip(),
+            "status": status,
+            "meta": meta or {}
+        }
+        state.setdefault("negotiation_log", []).append(entry)
+
+    def _sample_ml_row(self) -> Optional[Dict[str, Any]]:
+        if self.ml_dataset is None or self.ml_dataset.empty:
+            return None
+        sample = self.ml_dataset.sample(1).iloc[0]
+        return {col: (float(val) if isinstance(val, (np.floating, np.integer)) else val)
+                for col, val in sample.to_dict().items()}
+
+    def _row_to_press_sensor_data(self, row: Dict[str, Any]) -> PressSensorData:
+        thickness = float(row.get("press_thickness") or row.get("Stage1.Output.Measurement0.U.Actual") or 2.0)
+        pressure = float(row.get("welding_pressure") or row.get("Machine4.Pressure.C.Actual") or 150.0)
+        temperature = float(row.get("combiner_temp1") or row.get("Machine4.Temperature1.C.Actual") or 25.0)
+        cycle_time = float(row.get("cycle_time", 3.0))
+        anomaly_type = row.get("anomaly_type")
+
+        return PressSensorData(
+            timestamp=datetime.now(),
+            thickness=thickness,
+            pressure=pressure,
+            temperature=temperature,
+            cycle_time=cycle_time,
+            is_anomaly=False,
+            anomaly_type=anomaly_type
+        )
+
+    def _predict_quality_from_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.ml_context_available or self.ml_model is None or self.ml_scaler is None:
+            raise RuntimeError("ML 컨텍스트가 준비되지 않았습니다.")
+
+        ordered = [row.get(col, 0.0) for col in self.ml_feature_cols]
+        features = np.array([ordered])
+        features_scaled = self.ml_scaler.transform(features)
+        predicted_strength = float(self.ml_model.predict(features_scaled)[0])
+
+        lsl = settings.welding_strength_lsl
+        target = settings.welding_strength_target
+        usl = settings.welding_strength_usl
+
+        if predicted_strength >= target:
+            predicted_quality_score = 0.9 + 0.1 * (predicted_strength - target) / (usl - target)
+        else:
+            predicted_quality_score = 0.9 * (predicted_strength - lsl) / (target - lsl)
+        predicted_quality_score = float(np.clip(predicted_quality_score, 0.0, 1.0))
+
+        strength_degradation = max(0.0, (target - predicted_strength) / target * 100)
+
+        threshold = settings.quality_threshold
+        if predicted_quality_score >= threshold:
+            risk_level = "low"
+        elif predicted_quality_score >= threshold - 0.05:
+            risk_level = "medium"
+        elif predicted_quality_score >= threshold - 0.15:
+            risk_level = "high"
+        else:
+            risk_level = "critical"
+
+        recommendations = {
+            "low": "현재 파라미터 유지 가능",
+            "medium": "용접 파라미터 미세 조정 검토",
+            "high": "즉시 파라미터 조정 필요",
+            "critical": "긴급 조치 필요 - 생산 중단 고려"
+        }
+
+        return {
+            "predicted_quality_score": predicted_quality_score,
+            "predicted_strength": predicted_strength,
+            "strength_degradation_pct": strength_degradation,
+            "confidence": 0.92,
+            "risk_level": risk_level,
+            "recommendation": recommendations.get(risk_level, "검토 필요")
+        }
+
+    def _apply_adjustments_to_row(self, row: Dict[str, Any], adjustments: Dict[str, float]) -> Dict[str, Any]:
+        if not adjustments:
+            return row
+        adjusted = self.parameter_adapter.apply_control_adjustments(
+            data=row,
+            control_adjustments=adjustments,
+            recalculate_features=True
+        )
+        return adjusted
+
     def _monitor_node(self, state: WorkflowState) -> WorkflowState:
         """1단계: 공정 모니터링"""
         logger.info("[1/5] 공정 모니터링 시작")
 
-        # 프레스 공정 모니터링
-        press_data, alert = self.monitor.monitor_press_process(force_anomaly=True)
+        ml_row = self._sample_ml_row() if self.ml_context_available else None
+        state["ml_row"] = ml_row
+
+        if ml_row is not None:
+            press_sensor = self._row_to_press_sensor_data(ml_row)
+            press_data, alert = self.monitor.monitor_press_process(
+                force_anomaly=False,
+                press_data_override=press_sensor
+            )
+        else:
+            press_data, alert = self.monitor.monitor_press_process(force_anomaly=True)
 
         state["press_data"] = {
             "thickness": press_data.thickness,
@@ -152,32 +340,32 @@ class SmartFlowWorkflow:
     def _predict_node(self, state: WorkflowState) -> WorkflowState:
         """2단계: 품질 예측"""
         logger.info("[2/5] 품질 예측 시작")
+        ml_row = state.get("ml_row")
 
-        # 더미 PressSensorData 생성
-        from src.data.sensor_simulator import PressSensorData
-        from datetime import datetime
+        if ml_row is not None and self.ml_context_available:
+            ml_prediction = self._predict_quality_from_row(ml_row)
+            state["prediction"] = ml_prediction
+        else:
+            press_data_obj = PressSensorData(
+                timestamp=datetime.now(),
+                thickness=state["press_data"]["thickness"],
+                pressure=state["press_data"]["pressure"],
+                temperature=state["press_data"]["temperature"],
+                cycle_time=3.0,
+                is_anomaly=state["press_data"]["is_anomaly"],
+                anomaly_type=state["press_data"].get("anomaly_type"),
+            )
 
-        press_data_obj = PressSensorData(
-            timestamp=datetime.now(),
-            thickness=state["press_data"]["thickness"],
-            pressure=state["press_data"]["pressure"],
-            temperature=state["press_data"]["temperature"],
-            cycle_time=3.0,
-            is_anomaly=state["press_data"]["is_anomaly"],
-            anomaly_type=state["press_data"].get("anomaly_type"),
-        )
+            prediction = self.predictor.predict_from_press_data(press_data_obj)
 
-        # 품질 예측
-        prediction = self.predictor.predict_from_press_data(press_data_obj)
-
-        state["prediction"] = {
-            "predicted_quality_score": prediction.predicted_quality_score,
-            "predicted_strength": prediction.predicted_strength,
-            "strength_degradation_pct": prediction.strength_degradation_pct,
-            "confidence": prediction.confidence,
-            "risk_level": prediction.risk_level,
-            "recommendation": prediction.recommendation,
-        }
+            state["prediction"] = {
+                "predicted_quality_score": prediction.predicted_quality_score,
+                "predicted_strength": prediction.predicted_strength,
+                "strength_degradation_pct": prediction.strength_degradation_pct,
+                "confidence": prediction.confidence,
+                "risk_level": prediction.risk_level,
+                "recommendation": prediction.recommendation,
+            }
 
         logger.info(
             f"품질 예측 완료 - 예상 품질: {prediction.predicted_quality_score:.2%}, "
@@ -196,6 +384,21 @@ class SmartFlowWorkflow:
             # 현재 상황 설명
             press_data = state["press_data"]
             prediction = state["prediction"]
+
+            self._add_negotiation_log(
+                state,
+                role="quality_predictor",
+                label="품질 예측",
+                message=(
+                    f"예상 품질 {prediction['predicted_quality_score']:.1%}, "
+                    f"위험 {prediction['risk_level'].upper()}"
+                ),
+                status="alert",
+                meta={
+                    "thickness": f"{press_data['thickness']:.4f}mm",
+                    "pressure": f"{press_data['pressure']:.1f}MPa"
+                }
+            )
 
             current_issue = f"""
 프레스 공정에서 두께 편차 {abs(press_data['thickness'] - 2.0):.4f}mm가 감지되었습니다.
@@ -230,10 +433,17 @@ class SmartFlowWorkflow:
                 "risk_assessment": proposal.risk_assessment,
             }
 
-            state["negotiation_log"] = [
-                f"조정안 생성: {proposal.proposal_id}",
-                f"조정값: {proposal.adjustments}",
-            ]
+            self._add_negotiation_log(
+                state,
+                role="negotiator",
+                label="조정안 제안",
+                message=self._format_adjustment_action(proposal.adjustments),
+                status="proposal",
+                meta={
+                    "proposal_id": proposal.proposal_id,
+                    "expected_quality": f"{proposal.expected_quality:.1%}"
+                }
+            )
 
             logger.info(f"조정안 제안 완료: {proposal.adjustments}")
 
@@ -261,10 +471,14 @@ class SmartFlowWorkflow:
                 "risk_assessment": risk_level,
             }
 
-            state["negotiation_log"] = [
-                "기본 조정안 사용 (LLM 미사용)",
-                f"조정값: {adjustments}",
-            ]
+            self._add_negotiation_log(
+                state,
+                role="negotiator",
+                label="기본 조정안",
+                message=self._format_adjustment_action(adjustments),
+                status="fallback",
+                meta={"reason": "LLM unavailable"}
+            )
 
         state["workflow_status"] = "negotiation_complete"
         return state
@@ -297,6 +511,15 @@ class SmartFlowWorkflow:
             "rationale": decision.rationale,
             "conditions": decision.conditions,
         }
+
+        self._add_negotiation_log(
+            state,
+            role="coordinator",
+            label="승인 판단",
+            message=f"{decision.status.upper()} - {decision.rationale.splitlines()[0] if decision.rationale else ''}",
+            status="decision",
+            meta={"decision_id": decision.decision_id}
+        )
 
         logger.info(f"결정 완료: {decision.status}")
 
@@ -372,55 +595,117 @@ class SmartFlowWorkflow:
         decision = state["decision"]
 
         if decision["status"] in ["approved", "conditional_approved"]:
-            # 조정 실행 (시뮬레이션)
             adjustments = state["proposal"]["adjustments"]
 
-            # 조정 후 용접 데이터 생성
-            welding_data = self.simulator.generate_welding_data(
-                upstream_thickness=state["press_data"]["thickness"],
-                current_adjustment=adjustments.get("current", 0),
-                speed_adjustment=adjustments.get("welding_speed", 0),
-            )
+            if self.ml_context_available and state.get("ml_row") is not None:
+                base_row = state["ml_row"]
+                adjusted_row = self._apply_adjustments_to_row(base_row, adjustments)
+                final_prediction = self._predict_quality_from_row(adjusted_row)
 
-            # 재측정된 프레스 데이터
-            from src.data.sensor_simulator import PressSensorData
-            from datetime import datetime
+                state["execution_result"] = {
+                    "executed": True,
+                    "final_quality_score": final_prediction["predicted_quality_score"],
+                    "final_strength": final_prediction["predicted_strength"],
+                    "meets_threshold": final_prediction["predicted_quality_score"] >= settings.quality_threshold,
+                    "adjustments_applied": adjustments,
+                    "risk_level": final_prediction["risk_level"],
+                }
 
-            press_data_obj = PressSensorData(
-                timestamp=datetime.now(),
-                thickness=state["press_data"]["thickness"],
-                pressure=state["press_data"]["pressure"] * (1 + adjustments.get("pressure", 0)),
-                temperature=state["press_data"]["temperature"],
-                cycle_time=3.0,
-                is_anomaly=state["press_data"]["is_anomaly"],
-            )
+                state.setdefault("prediction", {})["post_adjustment_quality_score"] = final_prediction["predicted_quality_score"]
+                state["prediction"]["post_adjustment_risk_level"] = final_prediction["risk_level"]
+                state["ml_row_adjusted"] = adjusted_row
 
-            # 최종 품질 계산
-            quality_result = self.simulator.calculate_quality_impact(
-                press_data_obj,
-                welding_data
-            )
+                self._log_success_case(state)
 
-            state["execution_result"] = {
-                "executed": True,
-                "final_quality_score": quality_result["quality_score"],
-                "final_strength": quality_result["actual_strength"],
-                "meets_threshold": quality_result["meets_threshold"],
-                "adjustments_applied": adjustments,
-            }
+                self._add_negotiation_log(
+                    state,
+                    role="execution",
+                    label="조정 실행",
+                    message=(
+                        f"최종 품질 {final_prediction['predicted_quality_score']:.1%}, "
+                        f"위험 {final_prediction['risk_level'].upper()}"
+                    ),
+                    status="result",
+                    meta={
+                        "meets_threshold": state["execution_result"]["meets_threshold"],
+                        "final_strength": f"{final_prediction['predicted_strength']:.2f}MPa"
+                    }
+                )
 
-            self._log_success_case(state)
+                logger.info(
+                    f"조정 실행 완료 - 최종 품질: {final_prediction['predicted_quality_score']:.2%}"
+                )
+            else:
+                welding_data = self.simulator.generate_welding_data(
+                    upstream_thickness=state["press_data"]["thickness"],
+                    current_adjustment=adjustments.get("current", 0),
+                    speed_adjustment=adjustments.get("welding_speed", 0),
+                )
 
-            logger.info(
-                f"조정 실행 완료 - 최종 품질: {quality_result['quality_score']:.2%}"
-            )
+                press_data_obj = PressSensorData(
+                    timestamp=datetime.now(),
+                    thickness=state["press_data"]["thickness"],
+                    pressure=state["press_data"]["pressure"] * (1 + adjustments.get("pressure", 0)),
+                    temperature=state["press_data"]["temperature"],
+                    cycle_time=3.0,
+                    is_anomaly=state["press_data"]["is_anomaly"],
+                )
+
+                quality_result = self.simulator.calculate_quality_impact(
+                    press_data_obj,
+                    welding_data
+                )
+
+                final_risk = self.predictor.determine_risk_from_quality(
+                    quality_result["quality_score"]
+                )
+
+                state["execution_result"] = {
+                    "executed": True,
+                    "final_quality_score": quality_result["quality_score"],
+                    "final_strength": quality_result["actual_strength"],
+                    "meets_threshold": quality_result["meets_threshold"],
+                    "adjustments_applied": adjustments,
+                    "risk_level": final_risk,
+                }
+
+                state.setdefault("prediction", {})["post_adjustment_quality_score"] = quality_result["quality_score"]
+                state["prediction"]["post_adjustment_risk_level"] = final_risk
+
+                self._log_success_case(state)
+
+                self._add_negotiation_log(
+                    state,
+                    role="execution",
+                    label="조정 실행",
+                    message=(
+                        f"최종 품질 {quality_result['quality_score']:.1%}, "
+                        f"위험 {final_risk.upper()}"
+                    ),
+                    status="result",
+                    meta={
+                        "meets_threshold": quality_result["meets_threshold"],
+                        "final_strength": f"{quality_result['actual_strength']:.2f}MPa"
+                    }
+                )
+
+                logger.info(
+                    f"조정 실행 완료 - 최종 품질: {quality_result['quality_score']:.2%}"
+                )
         else:
             state["execution_result"] = {
                 "executed": False,
                 "reason": "Proposal rejected by coordinator",
             }
-
             logger.warning("조정 미실행 (제안 반려)")
+
+            self._add_negotiation_log(
+                state,
+                role="execution",
+                label="조정 중단",
+                message="제안이 반려되어 실행되지 않았습니다.",
+                status="warning"
+            )
 
         state["workflow_status"] = "execution_complete"
         return state
@@ -443,6 +728,8 @@ class SmartFlowWorkflow:
             "execution_result": {},
             "workflow_status": "initialized",
             "error_message": "",
+            "ml_row": None,
+            "ml_row_adjusted": None,
         }
 
         # 워크플로우 실행

@@ -214,13 +214,62 @@ with tab1:
             st.success("✅ 기존 RAG 데이터를 사용합니다")
             st.info("data/case_history.jsonl에 저장된 케이스를 사용합니다")
 
+    # 공정 단계 설정
+    if st.session_state.csv_data is not None:
+        st.markdown("---")
+        st.subheader("🔧 공정 단계 설정 (2-Stage Cascade Detection)")
+        st.markdown("""
+        **SmartFlow MVP 시나리오:**
+        - **1차 공정 (프레스)**: 두께·압력 이상 감지
+        - **2차 공정 (용접)**: 1차 이상이 품질에 미칠 영향 예측
+        - **조정**: 용접 파라미터를 조정해 품질 회복
+        """)
+
+        from config.data_schema import get_schema
+        schema = get_schema()
+
+        col_stage1, col_stage2 = st.columns(2)
+
+        with col_stage1:
+            st.markdown("**1️⃣ 프레스 공정 (Stage 1)**")
+            stage1_vars = schema.stage1.measurement_variables
+            st.info(f"측정 변수: {len(stage1_vars)}개")
+            with st.expander("변수 목록 보기", expanded=False):
+                for var in stage1_vars:
+                    available = "✅" if var in st.session_state.csv_data.columns else "❌"
+                    st.write(f"{available} `{var}`")
+
+        with col_stage2:
+            st.markdown("**2️⃣ 용접 공정 (Stage 2)**")
+            stage2_vars = schema.stage2.measurement_variables
+            st.info(f"측정 변수: {len(stage2_vars)}개")
+            with st.expander("변수 목록 보기", expanded=False):
+                for var in stage2_vars:
+                    available = "✅" if var in st.session_state.csv_data.columns else "❌"
+                    st.write(f"{available} `{var}`")
+
+        st.markdown("**🎯 제어 변수 → 측정 변수 매핑 (조정 시 사용)**")
+        control_mapping = schema.control_to_measurement_mapping
+        mapping_rows = []
+        for ctrl, measure in control_mapping.items():
+            mapping_rows.append({
+                "제어 변수 (개념)": ctrl,
+                "→ 측정 변수 (실제)": measure,
+                "데이터 존재": "✅" if measure in st.session_state.csv_data.columns else "❌"
+            })
+        mapping_df = pd.DataFrame(mapping_rows)
+        st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+
+        st.caption("""
+        💡 **Tip**: 워크플로우는 이 매핑을 사용해 제어 변수 조정값(예: current +3%)을
+        실제 측정 변수(예: welding_temp1)에 반영하고, 파생 변수를 재계산합니다.
+        """)
+
     # 다음 단계 버튼
     st.markdown("---")
     if st.session_state.csv_data is not None:
-        st.success("✅ 데이터 업로드 완료! 다음 단계로 진행하세요.")
-        if st.button("➡️ 다음: RAG 임베딩", type="primary", use_container_width=True):
-            st.session_state.pipeline_step = 1
-            st.rerun()
+        st.success("✅ 데이터 업로드 완료!")
+        st.info("👉 이제 상단의 **'2. RAG 임베딩'** 탭을 클릭하여 다음 단계로 진행하세요.")
     else:
         st.warning("⏸️ CSV 파일을 먼저 업로드하세요.")
 
@@ -316,10 +365,8 @@ with tab2:
                         import traceback
                         st.code(traceback.format_exc())
         else:
-            st.success("✅ RAG 임베딩 완료! 다음 단계로 진행하세요.")
-            if st.button("➡️ 다음: 모델 학습", type="primary", use_container_width=True):
-                st.session_state.pipeline_step = 2
-                st.rerun()
+            st.success("✅ RAG 임베딩 완료!")
+            st.info("👉 이제 상단의 **'3. 모델 학습'** 탭을 클릭하여 다음 단계로 진행하세요.")
 
 
 # ============================================================================
@@ -452,9 +499,8 @@ with tab3:
             except Exception as e:
                 st.info("모델 메트릭 파일을 찾을 수 없습니다.")
 
-            if st.button("➡️ 다음: 워크플로우 테스트", type="primary", use_container_width=True):
-                st.session_state.pipeline_step = 3
-                st.rerun()
+            st.markdown("---")
+            st.info("👉 이제 상단의 **'4. 워크플로우 테스트'** 탭을 클릭하여 실행하세요.")
 
 
 # ============================================================================
@@ -497,6 +543,9 @@ with tab4:
         # 워크플로우 결과 표시
         if st.session_state.workflow_result is not None:
             result = st.session_state.workflow_result
+            ml_row = result.get("ml_row") or {}
+            ml_row_adjusted = result.get("ml_row_adjusted") or {}
+            negotiation_log = result.get("negotiation_log") or []
 
             st.markdown("---")
             st.subheader("📊 실행 결과 요약")
@@ -530,25 +579,29 @@ with tab4:
             detail_col1, detail_col2 = st.columns(2)
 
             with detail_col1:
-                st.subheader("🔍 이상 감지")
+                st.subheader("🔍 이상 감지 (2-Stage Cascade)")
                 if result['alert']:
                     alert = result['alert']
                     st.error(f"""
                     **알림 ID**: {alert['alert_id']}
+                    **공정 단계**: {alert.get('process_stage', 'press').upper()}
                     **심각도**: {alert['severity'].upper()}
                     **문제**: {alert['issue_description']}
                     """)
+                    st.caption("💡 1차(프레스) 이상 → 2차(용접) 품질 저하 예상")
                 else:
                     st.success("이상 없음 - 정상 운영")
 
-                st.subheader("🤝 조정안")
+                st.subheader("🤝 조정안 (2차 공정 파라미터)")
                 proposal = result['proposal']
                 st.write(f"**제안 ID**: {proposal['proposal_id']}")
                 st.write(f"**예상 품질**: {proposal['expected_quality']:.1%}")
 
+                st.markdown("**조정 내역 (제어 변수 → 측정 변수):**")
                 adjustments = proposal['adjustments']
                 for param, value in adjustments.items():
                     st.write(f"- **{param}**: {value:+.1%}")
+                st.caption("💡 제어 변수 조정이 실제 센서 측정값에 반영됩니다.")
 
             with detail_col2:
                 st.subheader("✅ 최종 결정")
@@ -573,6 +626,108 @@ with tab4:
                     st.write(f"**품질 기준 충족**: {'✅ 예' if exec_result['meets_threshold'] else '❌ 아니오'}")
                 else:
                     st.warning(f"조정 미실행: {exec_result.get('reason', 'Unknown')}")
+
+            st.markdown("---")
+            st.subheader("💬 협상 로그")
+
+            if negotiation_log:
+                status_badge = {
+                    "alert": "🟥",
+                    "info": "🟦",
+                    "proposal": "🟩",
+                    "decision": "🟨",
+                    "result": "🟪",
+                    "fallback": "⬜",
+                    "warning": "🟧"
+                }
+
+                for entry in negotiation_log:
+                    # Handle both dict and string entries
+                    if isinstance(entry, dict):
+                        badge = status_badge.get(entry.get("status", "info"), "🔹")
+                        meta = entry.get("meta") or {}
+                        meta_text = ", ".join([f"{k}: {v}" for k, v in meta.items()]) if meta else ""
+
+                        st.markdown(
+                            f"{badge} **[{entry.get('timestamp','--:--')}] {entry.get('role','unknown')} · {entry.get('label','')}**"
+                        )
+                        st.write(entry.get("message", ""))
+                        if meta_text:
+                            st.caption(meta_text)
+                    else:
+                        # If entry is a string or other type, display it simply
+                        st.markdown(f"🔹 {entry}")
+                    st.divider()
+            else:
+                st.info("협상 로그가 비어 있습니다. LLM 협상 없이 기본 조정안이 사용되었을 수 있습니다.")
+
+            st.markdown("---")
+            st.subheader("🧮 ML 샘플 변수 비교 (공정별)")
+
+            if ml_row:
+                available_fields = sorted(ml_row.keys())
+                
+                # 공정별 변수 그룹
+                from config.data_schema import get_schema
+                schema = get_schema()
+                stage1_fields = [f for f in schema.stage1.measurement_variables if f in available_fields]
+                stage2_fields = [f for f in schema.stage2.measurement_variables if f in available_fields]
+                target_field = schema.target_variable if schema.target_variable in available_fields else None
+                
+                view_mode = st.radio(
+                    "변수 선택 모드",
+                    options=["공정별 자동 선택", "수동 선택"],
+                    horizontal=True,
+                    help="공정 단계별로 자동 필터링하거나 직접 선택하세요."
+                )
+                
+                if view_mode == "공정별 자동 선택":
+                    show_stage = st.radio(
+                        "표시할 공정",
+                        options=["1차(프레스)", "2차(용접)", "타겟", "전체"],
+                        horizontal=True
+                    )
+                    if show_stage == "1차(프레스)":
+                        selected_fields = stage1_fields
+                    elif show_stage == "2차(용접)":
+                        selected_fields = stage2_fields
+                    elif show_stage == "타겟":
+                        selected_fields = [target_field] if target_field else []
+                    else:
+                        selected_fields = stage1_fields + stage2_fields + ([target_field] if target_field else [])
+                else:
+                    default_fields = stage1_fields[:3] + stage2_fields[:3] + ([target_field] if target_field else [])
+                    selected_fields = st.multiselect(
+                        "표시할 변수 선택",
+                        options=available_fields,
+                        default=default_fields,
+                        help="ML 샘플에서 확인하고 싶은 센서·제어 변수를 선택하세요."
+                    )
+
+                if selected_fields:
+                    comparison_rows = []
+                    for field in selected_fields:
+                        base_val = ml_row.get(field)
+                        adj_val = ml_row_adjusted.get(field) if ml_row_adjusted else None
+
+                        if isinstance(base_val, (int, float)) and isinstance(adj_val, (int, float)) and base_val not in [0, None]:
+                            change_pct = (adj_val - base_val) / base_val * 100
+                        else:
+                            change_pct = None
+
+                        comparison_rows.append({
+                            "변수": field,
+                            "원본": base_val,
+                            "조정후": adj_val if ml_row_adjusted else "-",
+                            "변화율(%)": f"{change_pct:+.2f}%" if change_pct is not None else "-"
+                        })
+
+                    comparison_df = pd.DataFrame(comparison_rows).set_index("변수")
+                    st.dataframe(comparison_df, use_container_width=True)
+                else:
+                    st.info("표시할 변수를 선택하세요.")
+            else:
+                st.info("ML 데이터셋이 없어 시뮬레이터 입력을 사용했습니다. 업로드된 CSV로 모델을 학습하면 변수 비교가 가능합니다.")
 
 
 # ============================================================================
