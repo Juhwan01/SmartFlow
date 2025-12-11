@@ -14,6 +14,8 @@ from langchain.schema import HumanMessage, SystemMessage
 from src.rag.retriever import RAGRetriever
 from src.agents.quality_predictor import QualityPrediction
 from config import settings
+from config.data_schema import get_schema
+from src.prompts import PromptGenerator
 
 
 @dataclass
@@ -52,6 +54,10 @@ class NegotiationAgent:
         """
         self.agent_id = agent_id
         self.rag_retriever = rag_retriever or RAGRetriever()
+
+        # 스키마 및 프롬프트 생성기 초기화
+        self.schema = get_schema()
+        self.prompt_generator = PromptGenerator(self.schema)
 
         # RAG 초기화
         if not self.rag_retriever.initialized:
@@ -113,57 +119,21 @@ class NegotiationAgent:
             n_failure=1
         )
 
-        # LLM 프롬프트 구성
-        system_prompt = """당신은 스마트 제조 시스템의 품질 관리 전문가입니다.
-과거 사례 데이터베이스(RAG)를 참고하여, 현재 발생한 품질 문제에 대한 최적의 파라미터 조정안을 제안해야 합니다.
+        # LLM 프롬프트 생성 (PromptGenerator 사용)
+        system_prompt = self.prompt_generator.generate_negotiation_system_prompt()
 
-당신의 역할:
-1. ML 모델이 예측한 품질 저하를 언어적으로 해석
-2. 과거 성공/실패 사례를 분석하여 교훈 도출
-3. 구체적인 파라미터 조정값 제안
-4. 제안의 근거와 위험 요소 설명
+        # 예측 결과를 딕셔너리로 변환
+        prediction_dict = {
+            'predicted_value': prediction.predicted_strength,
+            'quality_score': prediction.predicted_quality_score
+        }
 
-중요:
-- 실패 사례에서 나타난 위험 요소는 피해야 합니다.
-- 성공 사례의 패턴을 따르되, 현재 상황에 맞게 조정하세요.
-- 파라미터 조정값은 백분율(%)로 제시하세요.
-"""
-
-        user_prompt = f"""## 현재 상황
-{current_issue}
-
-## ML 예측 결과
-- 예상 품질 점수: {prediction.predicted_quality_score:.2%}
-- 예상 강도: {prediction.predicted_strength:.2f}MPa
-- 강도 저하: {prediction.strength_degradation_pct:.2f}%
-- 위험 수준: {prediction.risk_level}
-
-## 공정 데이터
-{process_data}
-
-{rag_context}
-
-## 요청사항
-위 정보를 바탕으로 조정안을 제안하되, 반드시 다음 JSON 형식으로 응답하세요:
-
-```json
-{{
-  "situation_analysis": "현재 문제의 핵심 원인과 영향 설명 (2-3문장)",
-  "case_learning": "과거 사례에서 얻은 교훈 (2-3문장)",
-  "adjustments": {{
-    "welding_speed": -10,
-    "current": 7,
-    "pressure": 5
-  }},
-  "rationale": "왜 이 조정안이 효과적인지 설명 (2-3문장)",
-  "risk_assessment": "잠재적 위험과 완화 방안 (1-2문장)"
-}}
-```
-
-중요: 
-- adjustments의 값은 백분율 숫자로 입력 (예: -10은 -10%, 7은 +7%)
-- JSON 형식을 정확히 지켜주세요. 다른 텍스트 없이 JSON만 응답하세요.
-"""
+        user_prompt = self.prompt_generator.generate_user_prompt_for_negotiation(
+            current_issue=current_issue,
+            current_data=process_data,
+            prediction=prediction_dict,
+            rag_context=rag_context
+        )
 
         # LLM 호출
         messages = [

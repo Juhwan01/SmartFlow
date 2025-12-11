@@ -22,7 +22,8 @@ y_pred = model.predict(X)
 # 이상 감지
 lsl = settings.welding_strength_lsl
 usl = settings.welding_strength_usl
-margin = settings.anomaly_safety_margin_pct * lsl
+lsl_buffer = settings.lsl_safety_buffer
+usl_buffer = settings.usl_safety_buffer
 
 anomalies = []
 for pred in y_pred:
@@ -37,6 +38,6 @@ print(f'=== 서비스 로직 시뮬레이션 ===')
 print(f'Total 샘플: {len(y_pred)}')
 print(f'이상 감지: {anomaly_count}개')
 print(f'예측 범위: {y_pred.min():.2f} ~ {y_pred.max():.2f}')
-print(f'LSL: {lsl}, USL: {usl}, 마진: {margin:.4f}')
-print(f'하한 경계: {lsl + margin:.2f}')
-print(f'상한 경계: {usl - margin:.2f}')
+print(f'LSL: {lsl}, USL: {usl}, 하한 마진: {lsl_buffer:.4f}, 상한 마진: {usl_buffer:.4f}')
+print(f'하한 경계: {lsl + lsl_buffer:.2f}')
+print(f'상한 경계: {usl - usl_buffer:.2f}')

@@ -23,6 +23,8 @@ from loguru import logger
 import json
 
 from src.data.data_preprocessing import ManufacturingDataProcessor
+from config.data_schema import get_schema
+from src.features import FeatureEngineer
 
 
 class ModelTrainer:
@@ -34,6 +36,10 @@ class ModelTrainer:
         self.metrics = {}
         self.scaler = MinMaxScaler() # 자체 스케일러 사용
 
+        # 스키마 및 Feature Engineer 초기화
+        self.schema = get_schema()
+        self.feature_engineer = FeatureEngineer(self.schema)
+
     def _calculate_mape(self, y_true, y_pred):
         """MAPE 계산 (정밀도 지표)"""
         threshold = 0.1
@@ -43,130 +49,16 @@ class ModelTrainer:
         return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
 
     def feature_engineering(self, df):
-        """도메인 지식 기반 변수 추가"""
-        df_fe = df.copy()
-        
-        # 1. 용접 입열량 (Heat Input) 유사 변수
-        df_fe['heat_input_proxy'] = df_fe['welding_temp1'] / (df_fe['welding_temp3'] + 1e-5)
+        """
+        도메인 지식 기반 변수 추가 (FeatureEngineer 사용)
 
-        # 2. 압력과 온도의 상호작용
-        df_fe['pressure_x_temp2'] = df_fe['welding_pressure'] * df_fe['welding_temp2']
-        
-        # 3. 제어 변수 합계
-        df_fe['total_control'] = df_fe['welding_control1'] + df_fe['welding_control2']
+        Args:
+            df: 원본 데이터프레임
 
-        # 4. 프레스 공정의 면적/부피 유사 변수
-        df_fe['press_volume_proxy'] = df_fe['press_thickness'] * df_fe['press_measurement1']
-
-        # 5. 전체 세트포인트 대비 편차/비율 특성 생성 (타깃 열 제외)
-        target_col = 'welding_strength'
-        setpoint_cols = [col for col in df_fe.columns if col.endswith('_setpoint')]
-        for setpoint_col in setpoint_cols:
-            actual_col = setpoint_col.replace('_setpoint', '')
-            if actual_col == target_col:
-                continue  # 타깃 유출 방지
-            if actual_col in df_fe.columns:
-                error_col = f"{actual_col}_error"
-                ratio_col = f"{actual_col}_ratio"
-                df_fe[error_col] = df_fe[actual_col] - df_fe[setpoint_col]
-                df_fe[ratio_col] = np.where(
-                    df_fe[setpoint_col] != 0,
-                    df_fe[actual_col] / df_fe[setpoint_col],
-                    1.0
-                )
-
-        # Stage1 측정치 집계 통계
-        stage_error_cols = [
-            col for col in df_fe.columns
-            if col.startswith('stage1_measurement') and col.endswith('_error')
-        ]
-        if stage_error_cols:
-            stage_error_df = df_fe[stage_error_cols]
-            df_fe['stage1_error_mean'] = stage_error_df.mean(axis=1)
-            df_fe['stage1_error_std'] = stage_error_df.std(axis=1).fillna(0)
-            df_fe['stage1_error_abs_max'] = stage_error_df.abs().max(axis=1)
-
-        stage_ratio_cols = [
-            col for col in df_fe.columns
-            if col.startswith('stage1_measurement') and col.endswith('_ratio')
-        ]
-        if stage_ratio_cols:
-            stage_ratio_df = df_fe[stage_ratio_cols]
-            df_fe['stage1_ratio_mean'] = stage_ratio_df.mean(axis=1)
-            df_fe['stage1_ratio_std'] = stage_ratio_df.std(axis=1).fillna(0)
-
-        # Machine별 Derived Features
-        def add_diff(col_a, col_b, new_col):
-            if col_a in df_fe.columns and col_b in df_fe.columns:
-                df_fe[new_col] = df_fe[col_a] - df_fe[col_b]
-
-        add_diff('machine1_zone1_temp', 'machine1_zone2_temp', 'machine1_zone_temp_diff')
-        add_diff('machine2_zone1_temp', 'machine2_zone2_temp', 'machine2_zone_temp_diff')
-        add_diff('machine3_zone1_temp', 'machine3_zone2_temp', 'machine3_zone_temp_diff')
-        add_diff('welding_temp5', 'welding_temp1', 'welding_temp_span')
-        add_diff('combiner_temp3', 'combiner_temp1', 'combiner_temp_gradient')
-
-        def add_power_proxy(amperage_col, rpm_col, new_col):
-            if amperage_col in df_fe.columns and rpm_col in df_fe.columns:
-                df_fe[new_col] = df_fe[amperage_col] * df_fe[rpm_col]
-
-        add_power_proxy('machine1_motor_amperage', 'machine1_motor_rpm', 'machine1_power_proxy')
-        add_power_proxy('machine2_motor_amperage', 'machine2_motor_rpm', 'machine2_power_proxy')
-        add_power_proxy('machine3_motor_amperage', 'machine3_motor_rpm', 'machine3_power_proxy')
-
-        # Raw material 조성 평균
-        for prop_idx in range(1, 5):
-            cols = [
-                f"machine{machine_idx}_raw_property{prop_idx}"
-                for machine_idx in (1, 2, 3)
-                if f"machine{machine_idx}_raw_property{prop_idx}" in df_fe.columns
-            ]
-            if len(cols) >= 2:
-                df_fe[f"raw_property{prop_idx}_avg"] = df_fe[cols].mean(axis=1)
-
-        # Ambient & Welding 환경 지수
-        if {'ambient_temperature', 'ambient_humidity'} <= set(df_fe.columns):
-            df_fe['ambient_index'] = (
-                df_fe['ambient_temperature'] * 0.7 + df_fe['ambient_humidity'] * 0.3
-            )
-
-        temp_features = [col for col in ['welding_temp1', 'welding_temp2', 'welding_temp3', 'welding_temp4', 'welding_temp5'] if col in df_fe.columns]
-        if temp_features:
-            df_fe['welding_temp_mean'] = df_fe[temp_features].mean(axis=1)
-
-        machine5_temps = [col for col in ['machine5_temp3', 'machine5_temp4', 'machine5_temp5', 'machine5_temp6'] if col in df_fe.columns]
-        if machine5_temps:
-            df_fe['machine5_temp_mean'] = df_fe[machine5_temps].mean(axis=1)
-
-        # Temporal Features (1-step lag, rolling mean, trend)
-        temporal_cols = [
-            'press_thickness',
-            'stage1_error_mean',
-            'welding_temp1',
-            'welding_temp3',
-            'welding_pressure',
-            'ambient_temperature'
-        ]
-
-        for col in temporal_cols:
-            if col in df_fe.columns:
-                lag_col = f"{col}_lag1"
-                roll_col = f"{col}_roll3"
-                trend_col = f"{col}_trend"
-                df_fe[lag_col] = df_fe[col].shift(1)
-                df_fe[roll_col] = df_fe[col].rolling(window=3, min_periods=1).mean()
-                df_fe[lag_col] = df_fe[lag_col].fillna(df_fe[col])
-                df_fe[roll_col] = df_fe[roll_col].fillna(df_fe[col])
-                df_fe[trend_col] = df_fe[col] - df_fe[lag_col]
-
-        # 세트포인트 컬럼 드롭 (누설 방지)
-        drop_cols = [col for col in df_fe.columns if col.endswith('_setpoint')]
-        df_fe = df_fe.drop(columns=drop_cols, errors='ignore')
-
-        # 남은 결측치 처리
-        df_fe = df_fe.ffill().bfill()
-
-        return df_fe
+        Returns:
+            피처가 추가된 데이터프레임
+        """
+        return self.feature_engineer.apply(df, skip_missing=True)
 
     def train_xgboost(
         self,

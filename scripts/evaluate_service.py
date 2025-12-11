@@ -28,6 +28,11 @@ from src.agents.coordinator import CoordinatorAgent, ProductionGoals
 from src.data.sensor_simulator import PressSensorData
 from config import settings
 
+# 모듈화된 컴포넌트 import
+from config.data_schema import get_schema, CONTINUOUS_FACTORY_SCHEMA
+from src.features import FeatureEngineer
+from src.adjustment import ParameterAdapter
+
 
 @dataclass
 class SampleEvaluationResult:
@@ -60,6 +65,12 @@ class ServiceEvaluator:
         self.quality_threshold = quality_threshold
         self.cost_per_defect = cost_per_defect
         self.max_iterations = max_iterations
+
+        # 스키마 및 모듈화된 컴포넌트 초기화
+        logger.info("데이터 스키마 및 모듈 초기화 중...")
+        self.schema = get_schema()
+        self.feature_engineer = FeatureEngineer(self.schema)
+        self.parameter_adapter = ParameterAdapter(self.schema, self.feature_engineer)
 
         # 실제 서비스 에이전트 초기화
         logger.info("실제 Multi-Agent 시스템 초기화 중...")
@@ -278,60 +289,20 @@ class ServiceEvaluator:
         adjustments: Dict[str, float]
     ) -> Dict[str, float]:
         """
-        조정값 적용 및 파생 변수 재계산
+        조정값 적용 및 파생 변수 재계산 (ParameterAdapter 사용)
 
-        시계열 파생 변수(lag, roll, trend)는 과거 데이터 없이 재계산 불가능
-        → 기존 값 유지 (현실적 절충)
+        Args:
+            raw_row: 원본 데이터 딕셔너리
+            adjustments: 제어 변수 조정값 (예: {"current": 0.03, "welding_speed": -0.05})
 
-        현재 값만으로 재계산 가능한 파생 변수만 업데이트
+        Returns:
+            조정이 적용된 데이터 딕셔너리
         """
-        adjusted = raw_row.copy()
-
-        # 파라미터 매핑 및 조정
-        param_mapping = {
-            "welding_speed": "welding_temp3",
-            "current": "welding_temp1",
-            "pressure": "welding_pressure"
-        }
-
-        for adj_key, feature_name in param_mapping.items():
-            if adj_key in adjustments and feature_name in adjusted:
-                adjusted[feature_name] *= (1 + adjustments[adj_key])
-
-        # ========================================
-        # 파생 피처 재계산 (현재 값만으로 계산 가능한 것만)
-        # ========================================
-
-        # 1. heat_input_proxy = welding_temp1 / welding_temp3
-        if {"welding_temp1", "welding_temp3"}.issubset(adjusted):
-            denom = adjusted["welding_temp3"] if adjusted["welding_temp3"] != 0 else 1e-5
-            adjusted["heat_input_proxy"] = adjusted["welding_temp1"] / denom
-
-        # 2. welding_temp_mean = mean(welding_temps)
-        welding_temp_cols = ["welding_temp1", "welding_temp2", "welding_temp3",
-                             "welding_temp4", "welding_temp5"]
-        if all(col in adjusted for col in welding_temp_cols):
-            adjusted["welding_temp_mean"] = sum(adjusted[col] for col in welding_temp_cols) / len(welding_temp_cols)
-
-        # 3. welding_temp_span = max - min
-        if "welding_temp_mean" in adjusted:  # welding_temp_cols가 모두 있다는 의미
-            temps = [adjusted[col] for col in welding_temp_cols]
-            adjusted["welding_temp_span"] = max(temps) - min(temps)
-
-        # 4. pressure_x_temp2 = welding_pressure * welding_temp2
-        if {"welding_pressure", "welding_temp2"}.issubset(adjusted):
-            adjusted["pressure_x_temp2"] = adjusted["welding_pressure"] * adjusted["welding_temp2"]
-
-        # 5. total_control = welding_control1 + welding_control2
-        if {"welding_control1", "welding_control2"}.issubset(adjusted):
-            adjusted["total_control"] = adjusted["welding_control1"] + adjusted["welding_control2"]
-
-        # 참고: 시계열 파생 변수 (재계산 불가능 → 기존 값 유지)
-        # - welding_temp1_lag1, welding_temp1_roll3, welding_temp1_trend
-        # - welding_temp3_lag1, welding_temp3_roll3, welding_temp3_trend
-        # - welding_pressure_lag1, welding_pressure_roll3, welding_pressure_trend
-
-        return adjusted
+        return self.parameter_adapter.apply_control_adjustments(
+            data=raw_row,
+            control_adjustments=adjustments,
+            recalculate_features=True
+        )
 
     def _simulate_ground_truth_effect(
         self,
